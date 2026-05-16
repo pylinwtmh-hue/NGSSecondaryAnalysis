@@ -39,16 +39,16 @@ FASTQ (R1, R2)
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Step 1 · Alignment (GPU)                               │
-│  Parabricks fq2bam (BWA-MEM2 + BQSR)                   │
+│  Parabricks fq2bam (BWA-MEM2 + BQSR)                    │
 └───────────────────────┬─────────────────────────────────┘
                         │
           ┌─────────────┴─────────────┐
           ▼                           ▼
-┌──────────────────┐       ┌──────────────────────────┐
-│  Step 2 · QC     │       │  Step 3 · Parallel        │
+┌──────────────────┐       ┌────────────────────────────┐
+│  Step 2 · QC     │       │  Step 3 · Parallel         │
 │  SAMtools stats  │       │  Variant Calling           │
 │  Mosdepth        │       │                            │
-└──────────────────┘       │  Lane 1 ─ DeepVariant(GPU)│
+└──────────────────┘       │  Lane 1 ─ DeepVariant(GPU) │
                            │  Lane 2a─ HaplotypeCaller  │
                            │         (GPU)              │
                            │  Lane 2b─ GATK VQSR        │
@@ -63,14 +63,14 @@ FASTQ (R1, R2)
                            └──────────────┬─────────────┘
                                           │
                                           ▼
-                           ┌──────────────────────────┐
-                           │  Step 4 · Post-processing │
-                           │  BCFtools Ensemble        │
-                           │  (DV + HC/VQSR merge)     │
-                           │  AutoMap ROH              │
-                           │  BCFtools Stats           │
-                           │  MultiQC                  │
-                           └──────────────────────────┘
+                           ┌────────────────────────────┐
+                           │  Step 4 · Post-processing  │
+                           │  BCFtools Ensemble         │
+                           │  (DV + HC/VQSR merge)      │
+                           │  AutoMap ROH               │
+                           │  BCFtools Stats            │
+                           │  MultiQC                   │
+                           └────────────────────────────┘
 ```
 
 ### `main_research.nf` — Research Pipeline (non-commercial only)
@@ -87,16 +87,16 @@ FASTQ (R1, R2)
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Step 1 · Alignment (GPU)                               │
-│  Parabricks fq2bam (BWA-MEM2 + BQSR)                   │
+│  Parabricks fq2bam (BWA-MEM2 + BQSR)                    │
 └───────────────────────┬─────────────────────────────────┘
                         │
           ┌─────────────┴─────────────┐
           ▼                           ▼
-┌──────────────────┐       ┌──────────────────────────┐
-│  Step 2 · QC     │       │  Step 3 · Parallel        │
+┌──────────────────┐       ┌────────────────────────────┐
+│  Step 2 · QC     │       │  Step 3 · Parallel         │
 │  SAMtools stats  │       │  Variant Calling           │
 │  Mosdepth        │       │                            │
-└──────────────────┘       │  Lane 1 ─ DeepVariant(GPU)│
+└──────────────────┘       │  Lane 1 ─ DeepVariant(GPU) │
                            │  Lane 2a─ HaplotypeCaller  │
                            │         (GPU)              │
                            │  Lane 2b─ GATK VQSR        │
@@ -112,14 +112,14 @@ FASTQ (R1, R2)
                            └──────────────┬─────────────┘
                                           │
                                           ▼
-                           ┌──────────────────────────┐
-                           │  Step 4 · Post-processing │
-                           │  BCFtools Ensemble        │
-                           │  (DV + HC/VQSR merge)     │
-                           │  AutoMap ROH              │
-                           │  BCFtools Stats           │
-                           │  MultiQC                  │
-                           └──────────────────────────┘
+                           ┌────────────────────────────┐
+                           │  Step 4 · Post-processing  │
+                           │  BCFtools Ensemble         │
+                           │  (DV + HC/VQSR merge)      │
+                           │  AutoMap ROH               │
+                           │  BCFtools Stats            │
+                           │  MultiQC                   │
+                           └────────────────────────────┘
 
 ⚠️ Manta and ExpansionHunter are licensed under PolyForm Strict
    License 1.0.0 — non-commercial use only.
