@@ -376,10 +376,15 @@ workflow {
     // =========================================================
     // (F) Step 5: Post-processing
     // =========================================================
-    BCFTOOLS_ENSEMBLE(
-        ch_dv_vcf,
-        ch_filtered_hc_vcf
-    )
+    // join() 確保同一樣本的 DV 和 HC VCF 配對
+    // 沒有 join 的話，DV 和 HC 執行時間不同，多樣本時會跨樣本錯配
+    ch_ensemble_input = ch_dv_vcf
+        .join(ch_filtered_hc_vcf, by: 0)
+        .map { meta, dv_vcf, dv_tbi, hc_vcf, hc_tbi ->
+            [meta, dv_vcf, dv_tbi, hc_vcf, hc_tbi]
+        }
+
+    BCFTOOLS_ENSEMBLE(ch_ensemble_input)
 
     // AutoMap ROH：用 HaplotypeCaller VCF（保留 AD 欄位，VQSR 後可能移除）
     AUTOMAP(ch_hc_vcf_raw)

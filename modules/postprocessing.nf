@@ -76,9 +76,12 @@ process BCFTOOLS_ENSEMBLE {
     //   dv_vcf - DeepVariant VCF（Lane 1 輸出）
     //   hc_vcf - HaplotypeCaller VCF（WGS: VQSR 後；WES: 直接輸出）
     input:
-    tuple val(meta),  path(dv_vcf),  path(dv_tbi)
-    tuple val(meta2), path(hc_vcf),  path(hc_tbi)
-
+    // main.nf 用 .join(by: 0) 確保同一樣本配對後合併成單一 tuple 傳入
+    // 避免多樣本非同步完成時 DV/HC 跨樣本錯配的 bug
+    tuple val(meta),
+        path(dv_vcf), path(dv_tbi),
+        path(hc_vcf), path(hc_tbi)
+        
     // OUTPUT:
     //   vcf - 兩個 caller 合併且校正過 ploidy後的 ensemble VCF（含 SOURCE INFO tag，2 samples）
     output:
