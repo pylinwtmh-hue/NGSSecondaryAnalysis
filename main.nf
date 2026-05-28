@@ -219,14 +219,16 @@ workflow {
         ch_filtered_hc_vcf = ch_hc_vcf_raw  // ← WES 直接用壓縮後的
     }
 
-    // Lane 3a: CNVkit (WGS/WES)
-    ch_cnvkit_pon = params.cnvkit_pon ? file(params.cnvkit_pon) : file("NO_FILE")
-    CNVKIT_BATCH(
-        ch_bam,
-        ch_dv_vcf,
-        ch_fasta,
-        ch_cnvkit_pon
-    )
+    // Lane 3a: CNVkit (WGS only)
+    if (params.seq_type == "WGS") {
+        ch_cnvkit_pon = params.cnvkit_pon ? file(params.cnvkit_pon) : file("NO_FILE")
+        CNVKIT_BATCH(
+            ch_bam,
+            ch_dv_vcf,
+            ch_fasta,
+            ch_cnvkit_pon
+        )
+    }
 
     // Lane 3b: Delly SV calling（替代 Manta，BSD license）
     ch_delly_excl = params.delly_excl ? file(params.delly_excl) : file("NO_FILE")
@@ -239,8 +241,8 @@ workflow {
     if (params.seq_type == "WES" && params.run_gcnv) {
         ch_gcnv_intervals    = file(params.gcnv_pon_dir)
         ch_ploidy_model      = file(params.gcnv_ploidy_model_dir)
-        ch_model_shards_list = Channel.fromPath("${params.gcnv_model_dir}/*-model", type: 'dir').collect()
-        ch_model_shards_flat = Channel.fromPath("${params.gcnv_model_dir}/*-model", type: 'dir')
+        ch_model_shards_list = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir').collect()
+        ch_model_shards_flat = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir')
         
         GATK_COLLECT_READ_COUNTS(
             ch_bam, ch_fasta, ch_fasta_fai, ch_fasta_dict,
