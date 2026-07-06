@@ -27,9 +27,13 @@
  *  *
  *  * THIRD-PARTY TOOLS NOTICE:
  *  * This pipeline orchestrates third-party tools subject to their own licenses.
- *  * Users of main_research.nf must comply with:
- *  *   - Manta (Illumina): PolyForm Strict License 1.0.0 (non-commercial only)
- *  *   - ExpansionHunter (Illumina): PolyForm Strict License 1.0.0 (non-commercial only)
+ *  * Optional callers are controlled by flags (all default OFF):
+ *  *   - Manta (Illumina, PolyForm Strict 1.0.0)            --run_manta
+ *  *   - ExpansionHunter (Illumina, PolyForm Strict 1.0.0)  --run_expansionhunter
+ *  *   - ROH via bcftools roh (MIT/GPL, commercial OK)      --run_roh
+ *  *   - ROH via AutoMap (no license published)             --run_automap
+ *  * Defaults reproduce the evaluated outputs (SNV/indel, CNV/SV, STR, mito).
+ *  * ROH is off by default and is not part of the evaluation.
  *  * See README.md and LICENSE for details.
  *
  * DISCLAIMER: This pipeline is provided "as is" without
@@ -57,19 +61,14 @@ include { PARABRICKS_DEEPVARIANT;
 include { CNVKIT_BATCH;
           DELLY_GERMLINE;
           BCFTOOLS_CONVERT_DELLY;
+          MANTA_GERMLINE;
           GATK_COLLECT_READ_COUNTS;
           GATK_PLOIDY_CASE;
           GATK_GERMLINE_CNV_CASE;
           GATK_POSTPROCESS_CNV }            from './modules/cnv_sv'
-// include { CNVKIT_BATCH;
-//           MANTA_GERMLINE;
-//           GATK_COLLECT_READ_COUNTS;
-//           GATK_PLOIDY_CASE;
-//           GATK_GERMLINE_CNV_CASE;
-//           GATK_POSTPROCESS_CNV }            from './modules/cnv_sv'
 include { GANGSTR_CHROM;
-          GANGSTR_MERGE }                  from './modules/repeat'
-// include { EXPANSIONHUNTER }                 from './modules/repeat'
+          GANGSTR_MERGE;
+          EXPANSIONHUNTER }                from './modules/repeat'
 include { MITO_EXTRACT_READS;
           MITO_BAM2FASTQ_NORMAL;
           MITO_BAM2FASTQ_SHIFTED;
@@ -88,7 +87,7 @@ include { BGZIP_VCF as BGZIP_VCF_DV;
           BCFTOOLS_STATS;
           BCFTOOLS_STATS as BCFTOOLS_STATS_ENSEMBLE;
           MULTIQC }                         from './modules/postprocessing'
-include { AUTOMAP }                         from './modules/roh'
+include { AUTOMAP; BCFTOOLS_ROH }           from './modules/roh'
 
 if (!params.input_csv) {
     error "錯誤：請提供 --input_csv 參數"
@@ -234,8 +233,11 @@ workflow {
     ch_delly_excl = params.delly_excl ? file(params.delly_excl) : file("NO_FILE")
     DELLY_GERMLINE(ch_bam, ch_fasta, ch_fasta_fai, ch_delly_excl)
     BCFTOOLS_CONVERT_DELLY(DELLY_GERMLINE.out.bcf)
-    // // Lane 3b: Manta SV calling
-    // MANTA_GERMLINE(ch_bam, ch_fasta, ch_fasta_fai)
+
+    // Lane 3b（選用）: Manta SV calling（--run_manta，預設關閉；非商用授權）
+    if (params.run_manta) {
+        MANTA_GERMLINE(ch_bam, ch_fasta, ch_fasta_fai)
+    }
 
     // Lane 3c: gCNV (WES only，需 --run_gcnv true 且已有 PON)
     if (params.seq_type == "WES" && params.run_gcnv) {
@@ -298,8 +300,11 @@ workflow {
         }
 
     GANGSTR_MERGE(ch_gangstr_vcfs)
-    // // Lane 4: STR (ExpansionHunter)
-    // EXPANSIONHUNTER(ch_bam, ch_fasta, ch_fasta_fai, file(params.str_catalog))
+
+    // Lane 4（選用）: ExpansionHunter（--run_expansionhunter，預設關閉；非商用授權）
+    if (params.run_expansionhunter) {
+        EXPANSIONHUNTER(ch_bam, ch_fasta, ch_fasta_fai, file(params.str_catalog))
+    }
 
     // =========================================================
     // Lane 5: Mitochondria variant calling
@@ -388,8 +393,15 @@ workflow {
 
     BCFTOOLS_ENSEMBLE(ch_ensemble_input)
 
-    // AutoMap ROH：用 HaplotypeCaller VCF（保留 AD 欄位，VQSR 後可能移除）
-    AUTOMAP(ch_hc_vcf_raw)
+    // ROH（選用，皆預設關閉；ROH 不納入評鑑）：用 HaplotypeCaller VCF（保留 GT/AD）。
+    //   --run_roh     → bcftools roh（MIT/GPL，可商用）
+    //   --run_automap → AutoMap（無公開授權，僅非商用/研究）
+    if (params.run_roh) {
+        BCFTOOLS_ROH(ch_hc_vcf_raw)
+    }
+    if (params.run_automap) {
+        AUTOMAP(ch_hc_vcf_raw)
+    }
 
     BCFTOOLS_STATS(ch_dv_vcf)
     BCFTOOLS_STATS_ENSEMBLE(BCFTOOLS_ENSEMBLE.out.vcf)

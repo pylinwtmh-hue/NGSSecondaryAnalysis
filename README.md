@@ -12,14 +12,20 @@ A clinical-grade Nextflow DSL2 pipeline for whole-genome and whole-exome sequenc
 
 This pipeline performs secondary analysis of germline variants from short-read sequencing data (Illumina). It supports both WGS and WES modes, and is optimized for GPU-accelerated computing using NVIDIA Clara Parabricks.
 
-Two pipeline entry points are provided:
+A single entry point (`main.nf`) is used. Optional callers are toggled by flags
+(all default **off**):
 
-| Entry point | SV caller | STR caller | License | Use case |
-|-------------|-----------|------------|---------|----------|
-| `main.nf` | **Delly** (BSD) | **GangSTR** (GPL v3) | ✅ GPL v3 compatible | Clinical / commercial use |
-| `main_research.nf` | **Manta** (PolyForm Strict) | **ExpansionHunter** (PolyForm Strict) | ⚠️ Non-commercial only | Research use |
+| Optional tool | Flag | License |
+|---------------|------|---------|
+| Manta (SV) | `--run_manta` | PolyForm Strict 1.0.0 ⚠️ |
+| ExpansionHunter (STR) | `--run_expansionhunter` | PolyForm Strict 1.0.0 ⚠️ |
+| ROH — bcftools roh | `--run_roh` | MIT/GPL ✅ |
+| ROH — AutoMap | `--run_automap` | none published ⚠️ |
 
-> **Why two pipelines?** Manta and ExpansionHunter are licensed under [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0/), which restricts commercial use. If your institution charges for sequencing services, use `main.nf` with Delly and GangSTR.
+> Defaults reproduce the evaluated outputs — Delly (SV) + GangSTR (STR) + mito + CNV,
+> with Manta / ExpansionHunter off. **ROH is off by default** (not part of the
+> evaluation); enable it with `--run_roh` (bcftools roh, commercial-safe) or, for
+> non-commercial use, `--run_automap` (AutoMap).
 
 ---
 
@@ -72,16 +78,15 @@ FASTQ (R1, R2)
                            └──────────────────────────────┘
 ```
 
-### Key Differences: `main.nf` vs `main_research.nf`
+### Default vs optional callers
 
-| Step | `main.nf` (clinical) | `main_research.nf` (research) |
-|------|----------------------|-------------------------------|
-| **SV calling** (Lane 3b) | Delly v1.7.3 — BSD | Manta v1.6.0 — PolyForm Strict ⚠️ |
-| **STR calling** (Lane 4) | GangSTR v2.5.0 — GPL v3 | ExpansionHunter v5.0.0 — PolyForm Strict ⚠️ |
+| Step | Default (always runs) | Optional (opt-in flag) |
+|------|-----------------------|------------------------|
+| **SV calling** (Lane 3b) | Delly v1.7.3 — BSD-3 | Manta v1.6.0 — PolyForm Strict ⚠️ (`--run_manta`) |
+| **STR calling** (Lane 4) | GangSTR v2.5.0 — GPL | ExpansionHunter v5.0.0 — PolyForm Strict ⚠️ (`--run_expansionhunter`) |
+| **ROH** | — (off by default) | bcftools roh (`--run_roh`, MIT/GPL) or AutoMap (`--run_automap`, no license ⚠️) |
 | **SV output** | `{sample}.delly.vcf.gz` | `manta_results/results/variants/diploidSV.vcf.gz` |
 | **STR output** | `{sample}.str.vcf` + `.samplestats.tab` | `{sample}.str.vcf` + `.str.json` |
-| **Config** | `nextflow_main.config` | `nextflow_main_research.config` |
-| **Commercial use** | ✅ | ❌ |
 
 ---
 
@@ -397,7 +402,7 @@ nextflow -c ${PIPELINE_CONFIG} run ${PIPELINE_CODE}/main.nf \
 ├── 05_cnv_sv/                CNVkit + Delly (or Manta) + gCNV
 ├── 06_repeat/                GangSTR (or ExpansionHunter) STR
 ├── 07_mitochondria/          mtDNA variants (Mutect2)
-├── 08_roh/                   ROH regions (AutoMap)
+├── 08_roh/                   ROH regions (off by default; --run_roh bcftools / --run_automap)
 └── pipeline_info/            Execution reports
 ```
 
@@ -476,7 +481,7 @@ Expected QC values:
 
 This pipeline is released under the [GNU General Public License v3](LICENSE) (GPL v3). You are free to use, modify, and distribute this pipeline, including for commercial purposes, provided that any derivative works are also released under GPL v3.
 
-> ⚠️ **Research pipeline warning:** `main_research.nf` uses **Manta** and **ExpansionHunter**, both licensed under [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0/) which **prohibits commercial use**. If your institution charges for sequencing services, use `main.nf` (with Delly and GangSTR) instead, or obtain a separate commercial license from Illumina.
+> ⚠️ **Optional non-commercial tools (all default off):** `--run_manta` and `--run_expansionhunter` enable Manta / ExpansionHunter, licensed under [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0/) (prohibits commercial use); `--run_automap` enables AutoMap, which publishes **no license** (all rights reserved). For ROH prefer `--run_roh` (bcftools roh, MIT/GPL, commercial-safe). Leave the non-commercial flags off for commercial/clinical service.
 
 | Tool | Version | License |
 |------|---------|---------|
@@ -493,7 +498,7 @@ This pipeline is released under the [GNU General Public License v3](LICENSE) (GP
 | [GangSTR](https://github.com/gymreklab/GangSTR) | 2.5.0 | GPL v3 ✅ |
 | [BWA](https://github.com/lh3/bwa) | 0.7.19 | GPL v3 |
 | [MultiQC](https://github.com/MultiQC/MultiQC) | 1.33 | GPL v3 |
-| [AutoMap](https://github.com/mquinodo/AutoMap) | 1.3 | MIT |
+| [AutoMap](https://github.com/mquinodo/AutoMap) | 1.3 | ⚠️ none published (all rights reserved) — opt-in `--run_automap` |
 | [Manta](https://github.com/Illumina/manta) | 1.6.0 | PolyForm Strict 1.0.0 ⚠️ |
 | [ExpansionHunter](https://github.com/Illumina/ExpansionHunter) | 5.0.0 | PolyForm Strict 1.0.0 ⚠️ |
 
