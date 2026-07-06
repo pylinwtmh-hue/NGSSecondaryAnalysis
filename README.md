@@ -385,6 +385,7 @@ nextflow -c ${PIPELINE_CONFIG} run ${PIPELINE_CODE}/main.nf \
     --out_dir /path/to/output \
     -resume
 ```
+--run_manta --run_expansionhunter --run_automap if you want to run these 3 research tool
 
 ---
 
