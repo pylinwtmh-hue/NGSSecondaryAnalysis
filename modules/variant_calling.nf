@@ -198,10 +198,18 @@ process GATK_HAPLOTYPECALLER {
     def avail_mem = task.memory ? (task.memory.toGiga() - 4) : 12
 
     """
-    gatk --java-options "-Xmx${avail_mem}g" HaplotypeCaller \\
+# GATK4 已移除 HaplotypeCaller 的 on-the-fly --BQSR（broadinstitute/gatk#6041）。
+    # 改為先 ApplyBQSR 產生 recalibrated BAM，再進 HaplotypeCaller，
+    # 使 CPU 備援結果與 GPU 主線（Parabricks --in-recal-file）一致。
+    gatk --java-options "-Xmx${avail_mem}g" ApplyBQSR \\
         -R ${fasta} \\
         -I ${bam} \\
-        --BQSR ${recal_table} \\
+        --bqsr-recal-file ${recal_table} \\
+        -O ${meta.id}.recal.bam
+
+    gatk --java-options "-Xmx${avail_mem}g" HaplotypeCaller \\
+        -R ${fasta} \\
+        -I ${meta.id}.recal.bam \\
         -O ${meta.id}.haplotypecaller.vcf.gz \\
         -D ${dbsnp} \\
         -G StandardAnnotation \\
@@ -209,6 +217,8 @@ process GATK_HAPLOTYPECALLER {
         ${interval_arg} \\
         --native-pair-hmm-threads ${task.cpus} \\
         --max-reads-per-alignment-start 0
+
+    rm -f ${meta.id}.recal.bam ${meta.id}.recal.bai
     """
 }
 
