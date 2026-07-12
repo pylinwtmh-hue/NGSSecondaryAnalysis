@@ -273,7 +273,7 @@ process GCNV_COHORT {
     publishDir "${params.pon_out_dir}/gcnv_model/shards", mode: 'copy'
 
     input:
-    path interval_shard
+    tuple val(idx), path(interval_shard)
     path counts
     path annotated_intervals
     path ploidy_calls
@@ -283,7 +283,9 @@ process GCNV_COHORT {
     path "gcnv_calls_shard_*", emit: call_shard
 
     script:
-    def shard_name = interval_shard.baseName
+    // shard_name 用 channel 傳進來的 index（0,1,2...）。不能用 interval_shard.baseName——
+    // scatter 出來的每個 shard 檔名都是 scattered.interval_list，baseName 全相同會撞名互相覆蓋。
+    def shard_name = idx
     def counts_args = counts.collect { "-I ${it}" }.join(" \\\n        ")
     """
     gatk --java-options "-Xmx${task.memory.toGiga()-4}g" GermlineCNVCaller \
