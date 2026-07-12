@@ -175,6 +175,8 @@ workflow {
 
     SAMTOOLS_STATS(ch_bam)
     MOSDEPTH(ch_bam, ch_mosdepth_targets, ch_autosome_bed)
+    // (meta, summary.txt)：mito NuMT filter 與 MultiQC 共用同一輸出
+    ch_mosdepth_summary = MOSDEPTH.out.summary
 
     // =========================================================
     // (E) Step 4: Parallel Variant Calling
@@ -373,8 +375,10 @@ workflow {
         ch_mito_merge_input,
         ch_chrM_only_dict
         )
+    // MITO_FILTER 需要 autosomal coverage（NuMT filter），join mosdepth summary（依樣本配對）
+    ch_mito_filter_input = MITO_MERGE.out.vcf.join(ch_mosdepth_summary, by: 0)
     MITO_FILTER(
-        MITO_MERGE.out.vcf,
+        ch_mito_filter_input,
         ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
         ch_chrM_blacklist,
         file("${params.chrM_blacklist}.idx")
@@ -411,7 +415,7 @@ workflow {
         .mix(PARABRICKS_FQ2BAM.out.qc_metrics)
         .mix(SAMTOOLS_STATS.out.stats)
         .mix(MOSDEPTH.out.global_dist)
-        .mix(MOSDEPTH.out.summary)
+        .mix(ch_mosdepth_summary.map { meta, f -> f })
         .mix(BCFTOOLS_STATS.out.stats)
         .mix(BCFTOOLS_STATS_ENSEMBLE.out.stats)
         .collect()

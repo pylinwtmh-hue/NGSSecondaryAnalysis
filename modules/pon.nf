@@ -263,7 +263,10 @@ process SCATTER_INTERVALS {
 }
 
 // =========================================================
-// GATK gCNV: Cohort Model (散佈執行 - WES 高敏感度設定)
+// GATK gCNV: Cohort Model (散佈執行)
+// 超參數由 nextflow_pon.config 提供（貼齊 Broad germline CNV WDL 預設）：
+//   gcnv_p_alt / gcnv_cnv_coherence / gcnv_class_coherence / gcnv_p_active
+// ⚠️ 改動後必須重跑 main_pon.nf 重建 model；敏感度取捨見 CLAUDE.md。
 // =========================================================
 process GCNV_COHORT {
     label 'process_high'
@@ -290,9 +293,10 @@ process GCNV_COHORT {
         --contig-ploidy-calls ${ploidy_calls}/cohort-calls \
         --annotated-intervals ${annotated_intervals} \
         --interval-merging-rule OVERLAPPING_ONLY \
-        --cnv-coherence-length 1000.0 \
-        --class-coherence-length 1000.0 \
-        --p-alt 1e-3 \
+        --cnv-coherence-length ${params.gcnv_cnv_coherence} \
+        --class-coherence-length ${params.gcnv_class_coherence} \
+        --p-alt ${params.gcnv_p_alt} \
+        --p-active ${params.gcnv_p_active} \
         -O gcnv_model_shard_${shard_name} \
         --output-prefix cohort_${shard_name} \
         --verbosity INFO
