@@ -91,7 +91,7 @@ process MOSDEPTH {
     //   修改輸出：移除了 per-base，新增了 thresholds 和 regions
     output:
     path "*.global.dist.txt",     emit: global_dist
-    path "*.summary.txt",         emit: summary
+    tuple val(meta), path("*.summary.txt"), emit: summary
     path "*.thresholds.bed.gz*",  emit: thresholds   // 包含 .gz 和 .csi 索引
     path "*.regions.bed.gz*",     emit: regions      // 這是由 --by 產生的區塊深度
 

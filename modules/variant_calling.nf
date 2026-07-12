@@ -275,7 +275,7 @@ process GATK_VQSR_SNP {
         --tranches-file ${prefix}.snp.tranches \
         --trust-all-polymorphic \
         -tranche 100.0 -tranche 99.9 -tranche 99.5 -tranche 99.0 -tranche 90.0 \
-        -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR \
+        -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR -an DP \
         -mode SNP \
         --max-gaussians 8 \
         --resource:hapmap,known=false,training=true,truth=true,prior=15.0 ${hapmap} \

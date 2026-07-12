@@ -115,7 +115,6 @@ process CNVKIT_BATCH {
     cnvkit.py call ${prefix}.aligned.sorted.cns \
         -v ${vcf} \
         -m clonal \
-        --filter cn \
         ${sex_arg} \
         -o ${prefix}.call.cns
 
@@ -125,7 +124,8 @@ process CNVKIT_BATCH {
     cnvkit.py scatter ${prefix}.aligned.sorted.cnr -s ${prefix}.call.cns -v ${vcf} -o ${prefix}-scatter.pdf
     cnvkit.py diagram ${prefix}.aligned.sorted.cnr -s ${prefix}.call.cns ${sex_arg} -o ${prefix}-diagram.pdf
     """
-    // --filter cn 在某些版本的 CNVkit 對 germline 樣本可能過濾太激進，如果臨床上發現很多 CNV 消失，可以試試拿掉這個 filter。
+    // 已移除 --filter cn：評鑑診斷確認它對 germline 過濾太激進、會漏掉真實 CNV。
+    // 現在輸出所有 segment（含 CN=2），交由下游（三級 AnnotSV / 臨床審閱）判讀。
 }
 
 // Lane 3b: Delly（WGS/WES, MANTA商用政策改變，加入Delly）
@@ -175,7 +175,9 @@ process BCFTOOLS_CONVERT_DELLY {
 
     script:
     """
-    bcftools sort -O z -o ${meta.id}.delly.vcf.gz ${bcf}
+    # 只保留 FILTER=PASS（delly call 已依 PE>=3、MAPQ>=20 標記 PASS/LowQual；
+    # 單樣本不能用 delly filter -f germline，故在轉檔時直接過濾 PASS，砍掉 LowQual 噪音）
+    bcftools view -f PASS ${bcf} | bcftools sort -O z -o ${meta.id}.delly.vcf.gz -
     bcftools index --tbi ${meta.id}.delly.vcf.gz
     """
 }

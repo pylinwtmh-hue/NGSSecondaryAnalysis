@@ -151,7 +151,7 @@ process PARABRICKS_FQ2BAM {
         --knownSites ${known_sites_3} \
         --knownSites ${known_sites_4} \
         ${interval_arg} \
-        --bwa-options="-Y" \
+        --bwa-options="-Y -K 100000000" \
         --fix-mate \
         --optical-duplicate-pixel-distance 2500 \
         --num-gpus ${num_gpus} \

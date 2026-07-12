@@ -448,13 +448,12 @@ process MITO_FILTER {
     //   blacklist_idx        - blacklist BED 的 GATK index（需用 IndexFeatureFile 建立）
     //   mosdepth_summary     - MOSDEPTH 的 summary.txt reading depth 4.6.2 不再需要了
     input:
-    tuple val(meta), path(merged_vcf), path(merged_tbi), path(merged_stats)
+    tuple val(meta), path(merged_vcf), path(merged_tbi), path(merged_stats), path(mosdepth_summary)
     path fasta
     path fasta_fai
     path fasta_dict
     path blacklist
     path blacklist_idx
-    // path mosdepth_summary
 
     // OUTPUT:
     //   vcf - 最終過濾後的 chrM variant VCF（PASS = 可信變異）
@@ -465,12 +464,25 @@ process MITO_FILTER {
     script:
     def avail_mem = task.memory ? (task.memory.toGiga() - 1) : 4
     """
+    # 從 mosdepth summary 取 autosome (chr1-22) 平均深度，作為 NuMT filter 的核基因體覆蓋度。
+    # GATK mito best-practice 用中位數；mosdepth summary 提供平均值，為合理近似。
+    # 取不到（例如部分 WES summary）則省略 --autosomal-coverage，退回原本行為。
+    AUTO_COV=\$(awk -F'\\t' '\$1 ~ /^chr([1-9]|1[0-9]|2[0-2])\$/ {sum+=\$4; n++} END{ if(n>0) printf "%d", (sum/n)+0.5 }' ${mosdepth_summary})
+    AUTOCOV_ARG=""
+    if [ -n "\$AUTO_COV" ] && [ "\$AUTO_COV" -gt 0 ] 2>/dev/null; then
+        AUTOCOV_ARG="--autosomal-coverage \$AUTO_COV"
+        echo "[MITO_FILTER] ${meta.id} autosomal-coverage=\$AUTO_COV" >&2
+    else
+        echo "[MITO_FILTER] ${meta.id} 無 autosomal coverage，略過 --autosomal-coverage" >&2
+    fi
+
     # 執行過濾
     gatk --java-options "-Xmx${avail_mem}g" FilterMutectCalls \
         -R ${fasta} \
         -V ${merged_vcf} \
         -O ${meta.id}.mito_filtered_tmp.vcf.gz \
         --stats ${merged_stats} \
+        \$AUTOCOV_ARG \
         --mitochondria-mode
 
     # 套用黑名單過濾 (NuMTs 同源熱區)
