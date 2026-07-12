@@ -98,6 +98,10 @@ process CNVKIT_BATCH {
         sex_arg = "-y"
     }
 
+    // --filter cn 由 params.cnvkit_filter_cn 控制（預設 OFF，見 nextflow_main.config）。
+    // 關閉時輸出所有 segment；打開時依整數 CN 合併相鄰 segment。輸出檔名不受影響。
+    def filter_arg = params.cnvkit_filter_cn ? "--filter cn" : ""
+
     """
     # -----------------------------------------------------------------
     # 1. 核心 Batch (自動切換 WES 模型 vs WGS Flat 模式)
@@ -116,6 +120,7 @@ process CNVKIT_BATCH {
         -v ${vcf} \
         -m clonal \
         ${sex_arg} \
+        ${filter_arg} \
         -o ${prefix}.call.cns
 
     # -----------------------------------------------------------------
@@ -124,8 +129,10 @@ process CNVKIT_BATCH {
     cnvkit.py scatter ${prefix}.aligned.sorted.cnr -s ${prefix}.call.cns -v ${vcf} -o ${prefix}-scatter.pdf
     cnvkit.py diagram ${prefix}.aligned.sorted.cnr -s ${prefix}.call.cns ${sex_arg} -o ${prefix}-diagram.pdf
     """
-    // 已移除 --filter cn：評鑑診斷確認它對 germline 過濾太激進、會漏掉真實 CNV。
-    // 現在輸出所有 segment（含 CN=2），交由下游（三級 AnnotSV / 臨床審閱）判讀。
+    // --filter cn 改為 flag 控制（params.cnvkit_filter_cn，預設 OFF）：評鑑診斷確認它對
+    // germline 過濾太激進、會漏掉真實 CNV，故預設輸出所有 segment（含 CN=2），交由下游
+    // （三級 AnnotSV / 臨床審閱）判讀；需要時可設 cnvkit_filter_cn=true 恢復。
+    // 不論開關，輸出檔名固定為 ${prefix}.call.cns，三級自動抓檔（*.call.cns）不受影響。
 }
 
 // Lane 3b: Delly（WGS/WES, MANTA商用政策改變，加入Delly）
