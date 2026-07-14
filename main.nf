@@ -88,6 +88,7 @@ include { BGZIP_VCF as BGZIP_VCF_DV;
           BCFTOOLS_STATS as BCFTOOLS_STATS_ENSEMBLE;
           MULTIQC }                         from './modules/postprocessing'
 include { AUTOMAP; BCFTOOLS_ROH }           from './modules/roh'
+include { PHASE_ENSEMBLE }                  from './modules/phasing'
 
 if (!params.input_csv) {
     error "錯誤：請提供 --input_csv 參數"
@@ -396,6 +397,20 @@ workflow {
         }
 
     BCFTOOLS_ENSEMBLE(ch_ensemble_input)
+
+    // (選用) WhatsHap read-backed phasing：對 ensemble VCF 補上 PS phase set，
+    //   讓三級能判斷相鄰變異是否 in cis、正確合併/註解 compound（如相鄰 del+ins）。
+    //   非破壞性（只加 PS、把可 phase 的 GT 改成 '|'，不改變 variant 內容）。
+    //   預設關閉；在 DGX 驗證後以 --run_phasing true 開啟。DRAGEN 路徑自帶 PS，不需要。
+    //   產出 04_snv_indel/${id}.ensemble.phased.vcf.gz 供三級使用。
+    if (params.run_phasing) {
+        PHASE_ENSEMBLE(
+            BCFTOOLS_ENSEMBLE.out.vcf,
+            ch_bam,
+            ch_fasta,
+            ch_fasta_fai
+        )
+    }
 
     // ROH（選用，皆預設關閉；ROH 不納入評鑑）：用 HaplotypeCaller VCF（保留 GT/AD）。
     //   --run_roh     → bcftools roh（MIT/GPL，可商用）
