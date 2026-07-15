@@ -25,89 +25,111 @@
  *   - 由 params.run_phasing 開關，預設 false（在 DGX 驗證後再開）。
  *   - ensemble 是雙樣本(_DV/_HC)；WhatsHap 需單一樣本，故 --sample <id>_HC
  *     （HaplotypeCaller 有 local assembly，最可能把 compound 拆成相鄰兩筆）。
- *   - 只 phase 體染色體(chr1-22)。性染色體在二級 +fixploidy 後為混合/單倍體
- *     （男性 chrX：PAR diploid + 非PAR haploid → whatshap PloidyError），chrY/chrM haploid
- *     無從 phase → chrX/chrY/chrM 一律 passthrough（保留變異、不加 PS）。
- *   - 依 contig 平行(scatter)以控制 WGS 執行時間；phase block 受 read 連通性限制，
- *     本來就是 local，per-contig 與全基因體結果等價（phase set 不跨 contig）。
- *   - 三個 process、各用單一工具容器（符合本 pipeline 慣例）：
- *       WHATSHAP_SUBSET → bcftools（切出單一 contig）
- *       WHATSHAP_PHASE  → whatshap（可直接由 biocontainer 轉 sif，無需自建）
- *       WHATSHAP_CONCAT → bcftools（合併各 contig + 建索引 + publish）
+ *
+ * ── 依性別的倍體切分（sex-aware，與二級 +fixploidy 一致）─────────────────────
+ *   whatshap 要求「單一染色體倍體一致」，否則報 PloidyError(2 and 1)。二級
+ *   `bcftools +fixploidy` 依性別設定 chrX/chrY/chrM 倍體，所以 phasing 必須只餵
+ *   「diploid 區段」給 whatshap，其餘 passthrough（保留變異、不加 PS）：
+ *     * 體染色體 chr1-22            → diploid → phase
+ *     * 男性 chrX PAR1(1-2781479) + PAR2(155701383-156030895) → diploid → phase
+ *     * 男性 chrX 非PAR、chrY       → haploid → passthrough
+ *     * 女性/unknown chrX（全長）    → diploid → phase（fixploidy 對 unknown 視為 F）
+ *     * chrM                        → haploid → passthrough
+ *   座標與 postprocessing.nf 的 hg38_ploidy.txt 一致；要改請兩邊一起改。
+ *
+ *   分片各用單一工具容器（符合本 pipeline 慣例）：
+ *     WHATSHAP_SUBSET → bcftools（切出該分片的區段，可含多段以逗號分隔）
+ *     WHATSHAP_PHASE  → whatshap（type=phase 才 phase，type=pass 直接 cp）
+ *     WHATSHAP_CONCAT → bcftools（合併所有分片 + 索引 + publish）
  */
 
 // ─────────────────────────────────────────────────────────────
-// 切出單一 contig（bcftools 容器）
+// 依性別產生 phasing 分片：每筆 [region, type, idx]
+//   type: 'phase'（diploid，送 whatshap）/ 'pass'（haploid，直接 passthrough）
+//   男性判定與 BCFTOOLS_ENSEMBLE 一致（M / MALE），其餘（F / unknown / 空）視為女性。
+// ─────────────────────────────────────────────────────────────
+def buildPhaseShards(sex) {
+    def s = (sex ?: '').toString().toUpperCase()
+    def male = (s == 'M' || s == 'MALE')
+    def sh = []
+    (1..22).each { sh << ["chr${it}".toString(), 'phase'] }
+    if (male) {
+        // PAR1 + PAR2 為 diploid → phase；非PAR + 尾段 + chrY 為 haploid → passthrough
+        sh << ['chrX:1-2781479,chrX:155701383-156030895'.toString(), 'phase']
+        sh << ['chrX:2781480-155701382,chrX:156030896-156040895'.toString(), 'pass']
+        sh << ['chrY', 'pass']
+    } else {
+        sh << ['chrX', 'phase']
+        sh << ['chrY', 'pass']
+    }
+    sh << ['chrM', 'pass']
+    return sh.withIndex().collect { e, i -> [e[0], e[1], i] }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 切出該分片的區段（bcftools 容器）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_SUBSET {
-    tag "${meta.id}:${contig}"
+    tag "${meta.id}:${region}"
     label 'process_low'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), val(contig)
+    tuple val(meta), path(vcf), path(tbi), val(region), val(type), val(idx)
 
     output:
-    tuple val(meta), val(contig),
-          path("${meta.id}.${contig}.sub.vcf.gz"),
-          path("${meta.id}.${contig}.sub.vcf.gz.tbi")
+    tuple val(meta), val(idx), val(type),
+          path("${meta.id}.s${idx}.sub.vcf.gz"),
+          path("${meta.id}.s${idx}.sub.vcf.gz.tbi")
 
     script:
     """
-    # header 含全部 contig，故即使該 contig 無變異也只是輸出空 VCF（exit 0）。
-    bcftools view -r ${contig} ${vcf} -Oz -o ${meta.id}.${contig}.sub.vcf.gz
-    tabix -p vcf ${meta.id}.${contig}.sub.vcf.gz
+    # region 可含多段（逗號分隔，如男性 chrX PAR1,PAR2）；bcftools -r 支援。
+    bcftools view -r ${region} ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz
+    tabix -p vcf ${meta.id}.s${idx}.sub.vcf.gz
     """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 單一 contig phasing（whatshap 容器；只需 whatshap）
+// 分片 phasing（whatshap 容器；type=phase 才 phase）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_PHASE {
-    tag "${meta.id}:${contig}"
+    tag "${meta.id}:s${idx}(${type})"
     label 'process_medium'
 
     input:
-    tuple val(meta), val(contig), path(sub_vcf), path(sub_tbi), path(bam), path(bai)
+    tuple val(meta), val(idx), val(type), path(sub_vcf), path(sub_tbi), path(bam), path(bai)
     path fasta
     path fasta_fai
 
     output:
-    tuple val(meta), path("${meta.id}.${contig}.phased.vcf.gz")
+    tuple val(meta), path("${meta.id}.s${idx}.phased.vcf.gz")
 
     script:
-    """
-    # 只 phase 體染色體（diploid）。性染色體在二級 +fixploidy 後為「混合/單倍體」：
-    #   男性 chrX = PAR diploid + 非PAR haploid → whatshap 會報 PloidyError(2 and 1)；
-    #   chrY / chrM = haploid，本來就無從 phase。
-    # 因此 chrX/chrY/chrM（及其它非 chr1-22）一律 passthrough：保留變異、不加 PS、不進 whatshap。
-    # （臨床 compound 幾乎都在體染色體；性染色體 phasing 為未來 sex-aware 再議。）
-    case "${contig}" in
-        chr[1-9]|chr1[0-9]|chr2[0-2])
-            # 體染色體：有變異才 phase，空 contig 直接輸出（避免 whatshap 對空檔報錯）。
-            # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
-            if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
-                # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
-                # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
-                whatshap phase \\
-                    --reference ${fasta} \\
-                    --ignore-read-groups \\
-                    --sample ${meta.id}_HC \\
-                    -o ${meta.id}.${contig}.phased.vcf.gz \\
-                    ${sub_vcf} ${bam}
-            else
-                cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
-            fi
-            ;;
-        *)
-            # 性染色體 / chrM / 其它：passthrough，不 phase。
-            cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
-            ;;
-    esac
-    """
+    if (type == 'phase')
+        """
+        # 有變異才 phase，空分片直接輸出（避免 whatshap 對空檔報錯）。
+        # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
+        if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
+            # --ignore-read-groups 時需指定單一 sample（選 _HC）；--reference 開 re-alignment 對 indel 較準。
+            whatshap phase \\
+                --reference ${fasta} \\
+                --ignore-read-groups \\
+                --sample ${meta.id}_HC \\
+                -o ${meta.id}.s${idx}.phased.vcf.gz \\
+                ${sub_vcf} ${bam}
+        else
+            cp ${sub_vcf} ${meta.id}.s${idx}.phased.vcf.gz
+        fi
+        """
+    else
+        """
+        # haploid 區段（男性非PAR chrX / chrY / chrM）：passthrough，不 phase、不加 PS。
+        cp ${sub_vcf} ${meta.id}.s${idx}.phased.vcf.gz
+        """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 合併各 contig + 建索引 + publish（bcftools 容器）
+// 合併所有分片 + 建索引 + publish（bcftools 容器）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_CONCAT {
     tag "${meta.id}"
@@ -125,7 +147,7 @@ process WHATSHAP_CONCAT {
 
     script:
     """
-    # whatshap 輸出的分片未建索引；concat -a 需要索引，先各自建 tbi。
+    # 分片未建索引；concat -a 需要索引，先各自建 tbi。
     for f in ${phased_vcfs}; do tabix -f -p vcf \$f; done
     # -a 允許任意順序/重疊；再 sort 保證輸出座標有序。
     bcftools concat -a ${phased_vcfs} -Oz -o concat.vcf.gz
@@ -146,21 +168,20 @@ workflow PHASE_ENSEMBLE {
     fasta_fai
 
     main:
-    ch_contigs = Channel.fromList(params.phasing_contigs)
-
-    // 每個樣本 × 每個 contig 切檔
-    WHATSHAP_SUBSET(ensemble_ch.combine(ch_contigs))
+    // 依每個樣本的性別展開分片（涵蓋全基因體：diploid→phase、haploid→pass）
+    ch_shards = ensemble_ch.flatMap { meta, vcf, tbi ->
+        buildPhaseShards(meta.sex).collect { r -> tuple(meta, vcf, tbi, r[0], r[1], r[2]) }
+    }
+    WHATSHAP_SUBSET(ch_shards)
 
     // 併回該樣本的 BAM 後 phasing
     ch_phase_in = WHATSHAP_SUBSET.out
         .combine(bam_ch, by: 0)
-        .map { meta, contig, sv, st, bam, bai, recal -> [meta, contig, sv, st, bam, bai] }
+        .map { meta, idx, type, sv, st, bam, bai, recal -> tuple(meta, idx, type, sv, st, bam, bai) }
     WHATSHAP_PHASE(ch_phase_in, fasta, fasta_fai)
 
-    // 依 meta 收齊所有 contig（size = contig 數，因每個 contig 都會產出一份）後合併
-    ch_concat_in = WHATSHAP_PHASE.out
-        .groupTuple(by: 0, size: params.phasing_contigs.size())
-    WHATSHAP_CONCAT(ch_concat_in)
+    // 依 meta 收齊所有分片後合併（分片數因性別而異，故不指定 size）
+    WHATSHAP_CONCAT(WHATSHAP_PHASE.out.groupTuple(by: 0))
 
     emit:
     vcf = WHATSHAP_CONCAT.out.vcf   // tuple(meta, phased_vcf, tbi)
