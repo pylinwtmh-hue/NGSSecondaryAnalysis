@@ -1519,3 +1519,9 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
 35. **WhatsHap phasing（`--run_phasing`，NCKUH 專用）**：ensemble 是雙樣本(_DV/_HC)，whatshap 需 `--ignore-read-groups --sample <id>_HC`（phase HaplotypeCaller 欄，它 local assembly 最會把 compound 拆成相鄰兩筆）。biocontainer 只含 whatshap，故切 contig/合併/索引用 bcftools 容器、phase 用 whatshap 容器（per-contig scatter）。非破壞性（只加 PS），DRAGEN 自帶 PS 不走這條。
 36. **PON 就位建議用 `install_pon.sh`**（verify → 備份舊版 → mv 新版就位 → rollback）；PON samplesheet 用 `subsample_pon.py`（依 run 日期取最近 + 男女均衡 + 依 sample 去重，建議 ~100–150 個同 assay 樣本）；PON 建置監控用 `monitor_pon.sh`。
 37. **WhatsHap 對混合倍體染色體會報 `PloidyError: Inconsistent ploidy (2 and 1)`**：ensemble 經二級 `bcftools +fixploidy` 後，男性 chrX 為 PAR diploid + 非PAR haploid（混合倍體），whatshap 要求單一染色體倍體一致 → 解析 chrX 時崩潰（跑完所有體染色體後才爆，浪費數小時）。解法（sex-aware，見 `buildPhaseShards()`）：只把 **diploid 區段**送 whatshap、haploid 段 passthrough —— 體染色體全 phase；女性/unknown chrX 全長 phase；男性 chrX 只 phase PAR1(1-2781479)+PAR2(155701383-156030895)、非PAR/chrY passthrough；chrM passthrough。倍體切法與 `postprocessing.nf` 的 `hg38_ploidy.txt` 一致，**兩邊要改需一起改**。分片數因性別而異（男 26 / 女 25），故 groupTuple 不指定 size。
+38. **在 whatshap 容器裡做 `python3 -c` 空檔判斷會靜默失敗**：原本 WHATSHAP_PHASE 用
+    `if python3 -c "...有無變異..."; then whatshap; else cp; fi` 想跳過空 contig。但 whatshap
+    biocontainer 內 `python3` 環境不一定可用/該 one-liner 可能出錯 → `if` 為假 → 每個分片都走
+    `cp` passthrough → **輸出完全沒 phase（連 autosome 都沒 PS）卻不報錯**。症狀：`ensemble.phased.vcf.gz`
+    所有 het 的 PS 都是 `.`、header 沒有 `##FORMAT=<ID=PS>`。解法：拿掉空檔判斷，diploid 分片直接
+    跑 whatshap（phase 分片本就有變異；真空檔就讓它 fail loud）。診斷：`bcftools view -h ... | grep -iE 'whatshap|ID=PS'` 若空 = whatshap 從沒執行。

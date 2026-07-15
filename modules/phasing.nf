@@ -107,19 +107,16 @@ process WHATSHAP_PHASE {
     script:
     if (type == 'phase')
         """
-        # 有變異才 phase，空分片直接輸出（避免 whatshap 對空檔報錯）。
-        # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
-        if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
-            # --ignore-read-groups 時需指定單一 sample（選 _HC）；--reference 開 re-alignment 對 indel 較準。
-            whatshap phase \\
-                --reference ${fasta} \\
-                --ignore-read-groups \\
-                --sample ${meta.id}_HC \\
-                -o ${meta.id}.s${idx}.phased.vcf.gz \\
-                ${sub_vcf} ${bam}
-        else
-            cp ${sub_vcf} ${meta.id}.s${idx}.phased.vcf.gz
-        fi
+        # diploid 分片直接 phase。不做「python 空檔判斷」——它會因容器內 python 環境差異
+        # 而靜默 fallback 成 cp，造成「沒 phase 卻不報錯、autosome 也沒 PS」（本 bug）。
+        # 體染色體 / chrX-diploid 分片本就有變異，不需空檔判斷；真的空檔就讓它報錯（fail loud）。
+        # --ignore-read-groups 時需指定單一 sample（選 _HC）；--reference 開 re-alignment 對 indel 較準。
+        whatshap phase \\
+            --reference ${fasta} \\
+            --ignore-read-groups \\
+            --sample ${meta.id}_HC \\
+            -o ${meta.id}.s${idx}.phased.vcf.gz \\
+            ${sub_vcf} ${bam}
         """
     else
         """
