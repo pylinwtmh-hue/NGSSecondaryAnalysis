@@ -25,65 +25,51 @@
  *   - 由 params.run_phasing 開關，預設 false（在 DGX 驗證後再開）。
  *   - ensemble 是雙樣本(_DV/_HC)；WhatsHap 需單一樣本，故 --sample <id>_HC
  *     （HaplotypeCaller 有 local assembly，最可能把 compound 拆成相鄰兩筆）。
- *   - 依 contig 平行(scatter)以控制 WGS 執行時間；phase block 受 read 連通性限制，
- *     本來就是 local，per-contig 與全基因體結果等價（phase set 不跨 contig）。
- *
- * 容器：whatshap + bcftools（見 nextflow_main.config）。授權皆 MIT/GPL，可商用。
+ *   - 拆成兩個 process、各用單一工具容器（符合本 pipeline 慣例）：
+ *       WHATSHAP_PHASE → whatshap 容器（可直接由 biocontainer 轉 sif，無需自建）
+ *       WHATSHAP_INDEX → 既有 bcftools 容器（tabix 建索引 + publish）
  */
 
 // ─────────────────────────────────────────────────────────────
-// 每個 contig 各自 phase（scatter）
+// WhatsHap phasing（whatshap 容器；只需 whatshap）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_PHASE {
-    tag "${meta.id}:${contig}"
+    tag "${meta.id}"
     label 'process_medium'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), path(bam), path(bai), val(contig)
+    tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
     path fasta
     path fasta_fai
 
     output:
-    tuple val(meta),
-          path("${meta.id}.${contig}.phased.vcf.gz"),
-          path("${meta.id}.${contig}.phased.vcf.gz.tbi")
+    tuple val(meta), path("${meta.id}.ensemble.phased.vcf.gz")
 
     script:
-    def hc_sample = "${meta.id}_HC"
     """
-    # 取出此 contig 的變異（WhatsHap 只需讀該區間的 reads）
-    bcftools view -r ${contig} ${vcf} -Oz -o sub.vcf.gz
-    tabix -p vcf sub.vcf.gz
-
-    if [ \$(bcftools view -H sub.vcf.gz | head -c1 | wc -c) -eq 0 ]; then
-        # 此 contig 沒有變異：直接輸出（避免 WhatsHap 對空檔報錯）
-        cp sub.vcf.gz ${meta.id}.${contig}.phased.vcf.gz
-    else
-        # 雙樣本 ensemble：--ignore-read-groups 時必須指定單一 sample（選 _HC）
-        # phase 失敗（該 contig 無可用 read 等）則保留未 phase 版本，不中斷整條 pipeline
-        whatshap phase \\
-            --reference ${fasta} \\
-            --ignore-read-groups \\
-            --sample ${hc_sample} \\
-            -o ${meta.id}.${contig}.phased.vcf.gz \\
-            sub.vcf.gz ${bam} 2> ${meta.id}.${contig}.whatshap.log \\
-        || cp sub.vcf.gz ${meta.id}.${contig}.phased.vcf.gz
-    fi
-    tabix -f -p vcf ${meta.id}.${contig}.phased.vcf.gz
+    # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
+    # whatshap 會輸出 bgzip 壓縮 VCF（副檔名 .gz）；index 交給下一個 process（bcftools 容器）。
+    # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
+    whatshap phase \\
+        --reference ${fasta} \\
+        --ignore-read-groups \\
+        --sample ${meta.id}_HC \\
+        -o ${meta.id}.ensemble.phased.vcf.gz \\
+        ${vcf} ${bam}
     """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 收集各 contig 的 phased VCF，concat + sort 成單一檔
+// 建 tabix 索引 + publish（既有 bcftools 容器）
 // ─────────────────────────────────────────────────────────────
-process WHATSHAP_CONCAT {
+process WHATSHAP_INDEX {
     tag "${meta.id}"
     label 'process_low'
 
     publishDir "${params.out_dir}/${meta.id}/04_snv_indel", mode: 'copy'
 
     input:
-    tuple val(meta), path(vcfs), path(tbis)
+    tuple val(meta), path(phased_vcf)
 
     output:
     tuple val(meta),
@@ -92,11 +78,7 @@ process WHATSHAP_CONCAT {
 
     script:
     """
-    # -a 允許任意順序 / 重疊；再 sort 保證輸出座標有序
-    bcftools concat -a ${vcfs} -Oz -o concat.vcf.gz
-    bcftools sort concat.vcf.gz -Oz -o ${meta.id}.ensemble.phased.vcf.gz
     tabix -p vcf ${meta.id}.ensemble.phased.vcf.gz
-    rm -f concat.vcf.gz
     """
 }
 
@@ -111,20 +93,13 @@ workflow PHASE_ENSEMBLE {
     fasta_fai
 
     main:
-    // 每個樣本 × 每個 contig 展開
-    ch_contigs = Channel.fromList(params.phasing_contigs)
     ch_in = ensemble_ch
         .join(bam_ch, by: 0)
         .map { meta, vcf, tbi, bam, bai, recal -> [meta, vcf, tbi, bam, bai] }
-        .combine(ch_contigs)   // → (meta, vcf, tbi, bam, bai, contig)
 
     WHATSHAP_PHASE(ch_in, fasta, fasta_fai)
-
-    // 依 meta 收齊所有 contig（size = contig 數）後 concat
-    ch_grouped = WHATSHAP_PHASE.out
-        .groupTuple(by: 0, size: params.phasing_contigs.size())
-    WHATSHAP_CONCAT(ch_grouped)
+    WHATSHAP_INDEX(WHATSHAP_PHASE.out)
 
     emit:
-    vcf = WHATSHAP_CONCAT.out.vcf   // tuple(meta, phased_vcf, tbi)
+    vcf = WHATSHAP_INDEX.out.vcf   // tuple(meta, phased_vcf, tbi)
 }
