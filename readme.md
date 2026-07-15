@@ -95,6 +95,10 @@ apptainer build multiqc_1.33.sif \
 # Whatshap
 apptainer build /data/pylin1991/nf-containers/whatshap_2.8.sif \
   docker://quay.io/biocontainers/whatshap:2.8--py39h2de1943_0
+# 用途：對 NCKUH ensemble VCF 做 read-backed phasing 補 PS，供三級正確處理 compound
+#       （相鄰 cis del+ins，如 SUZ12 delAAAinsTT）。以 --run_phasing true 開啟（預設關），
+#       僅 NCKUH 路徑需要（DRAGEN VCF 自帶 PS）。此容器只含 whatshap；切檔/合併用既有
+#       bcftools 容器，phase 用此容器，依 contig 平行（見 modules/phasing.nf）。
 
 # Lane 3: SV/CNV（Parabricks 4.0+ 已移除這兩個工具）
 apptainer build manta_1.6.0.sif \
@@ -994,7 +998,10 @@ ls -lh ${PON_DIR}/gcnv_model/ploidy_model/
 
 echo "=== gcnv_model shard ==="
 ls -lh ${PON_DIR}/gcnv_model/shards/
-ls -lh ${PON_DIR}/gcnv_model/shards/gcnv_model_shard_scattered/
+ls -lh ${PON_DIR}/gcnv_model/shards/gcnv_model_shard_0/
+# shard 已改為各自 index（gcnv_model_shard_0..38，內層 cohort_0-model..cohort_38-model）；
+# 舊版曾全部撞名成 gcnv_model_shard_scattered（見踩坑 #33）。全部 *-model 應為 39：
+find ${PON_DIR}/gcnv_model/shards -maxdepth 2 -type d -name '*-model' | wc -l
 
 echo "=== cnvkit_reference ==="
 ls -lh ${PON_DIR}/cnvkit_reference/
@@ -1052,8 +1059,10 @@ rsync -a --update \
 du -sh /scratch/pylin1991/GenomicReference_Cache/hg38/gcnv_pon/
 
 # 確認 model shard 路徑（pipeline 會用 *-model glob）
-ls /scratch/pylin1991/GenomicReference_Cache/hg38/gcnv_pon/gcnv_model/shards/gcnv_model_shard_scattered/
-# 應該看到 cohort_scattered-model 和 cohort_scattered-tracking
+ls /scratch/pylin1991/GenomicReference_Cache/hg38/gcnv_pon/gcnv_model/shards/gcnv_model_shard_0/
+# 應該看到 cohort_0-model 和 cohort_0-tracking（每個 shard 各自 index：gcnv_model_shard_0..38）
+# 全部 *-model 數量應為 39（= scatter 分片數）：
+# find .../gcnv_pon/gcnv_model/shards -maxdepth 2 -type d -name '*-model' | wc -l
 
 # 確認 filtered.interval_list
 wc -l /scratch/pylin1991/GenomicReference_Cache/hg38/gcnv_pon/filtered.interval_list
@@ -1496,7 +1505,7 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
 21. Nextflow local executor 的 process_gpu maxForks 是 per-process 限制，不同 process 間不互相等待，需用 lock file 或 channel dependency 控制 GPU 使用順序
 22. bcftools fixploidy plugin 需設定 BCFTOOLS_PLUGINS=/usr/local/libexec/bcftools
 23. DGX-2 執行 nextflow 時需在沒有 nextflow.config 的目錄下執行，或將 nextflow.config 改名
-24. **gCNV case mode 的 --model 需指向 *-model 子目錄**，不是 shard 根目錄（例如應指向 `gcnv_model_shard_scattered/cohort_scattered-model`，而非 `gcnv_model_shard_scattered`）
+24. **gCNV case mode 的 --model 需指向 *-model 子目錄**，不是 shard 根目錄（例如應指向 `gcnv_model_shard_0/cohort_0-model`，而非 `gcnv_model_shard_0`）
 25. **BCFTOOLS_STATS 被呼叫兩次（DV + Ensemble）時輸出檔名會撞名**，需從 VCF 檔名自動產生 stats 檔名（`vcf.name.replace('.vcf.gz', '.vcf.stats')`）
 26. **COLLECT_GATK_COUNTS input 需宣告 fasta_fai 和 fasta_dict**，否則 GATK 找不到 .fai index
 27. **FILTER_INTERVALS 的 -L 參數需用 preprocessed.interval_list**，不能用 annotated.tsv（GATK 不認識 .tsv 格式作為 interval）
@@ -1505,3 +1514,7 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
 30. **PON samplesheet 不能有重複 sample ID**，多 lane 樣本需只保留一個（PON 不需要合併 lane）；重複樣本會造成 FILTER_INTERVALS 的 input file name collision
 31. **gCNV model 的 ch_model_shards glob 應為 `*-model`（單層）**，不是 `*/*-model`（雙層）
 32. PYTENSOR_FLAGS 在 DGX-2 的所有 gCNV 相關 process 都需要（PON 和 case mode），原因是 DGX-2 的 singularity runOptions 沒有 bind /home，導致容器內 /home/n101569 是唯讀的。本機因為有 bind /home 所以不受影響。
+33. **GCNV_COHORT scatter shard 撞名**：IntervalListTools 切出的每個 shard 檔名都叫 `scattered.interval_list`；若用 `interval_shard.baseName` 命名輸出，39 個 shard 會全部輸出到 `gcnv_model_shard_scattered` / `cohort_scattered-model` 互相覆蓋 → 模型只剩 1 個 shard。解法：channel 帶入 index（`tuple val(idx), path(interval_shard)`），用 idx 命名 → `gcnv_model_shard_0..38`、`cohort_0-model..cohort_38-model`。case mode 的 `*-model` glob 靠這些唯一名稱才收得齊 39 個。
+34. **FilterMutectCalls 在 GATK 4.6 沒有 `--autosomal-coverage`**（舊版才有，用於 polymorphic NuMT filter；亦見第 5 點的 median 版）。誤加會報 `autosomal-coverage is not a recognized option`，讓每個 case 的 MITO_FILTER 掛掉。Broad 現行 mito WDL 也不用它 → mito 過濾只靠 `--mitochondria-mode` + VariantFiltration blacklist mask。
+35. **WhatsHap phasing（`--run_phasing`，NCKUH 專用）**：ensemble 是雙樣本(_DV/_HC)，whatshap 需 `--ignore-read-groups --sample <id>_HC`（phase HaplotypeCaller 欄，它 local assembly 最會把 compound 拆成相鄰兩筆）。biocontainer 只含 whatshap，故切 contig/合併/索引用 bcftools 容器、phase 用 whatshap 容器（per-contig scatter）。非破壞性（只加 PS），DRAGEN 自帶 PS 不走這條。
+36. **PON 就位建議用 `install_pon.sh`**（verify → 備份舊版 → mv 新版就位 → rollback）；PON samplesheet 用 `subsample_pon.py`（依 run 日期取最近 + 男女均衡 + 依 sample 去重，建議 ~100–150 個同 assay 樣本）；PON 建置監控用 `monitor_pon.sh`。
