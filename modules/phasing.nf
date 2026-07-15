@@ -35,6 +35,7 @@
  *     * 男性 chrX 非PAR、chrY       → haploid → passthrough
  *     * 女性/unknown chrX（全長）    → diploid → phase（fixploidy 對 unknown 視為 F）
  *     * chrM                        → haploid → passthrough
+ *     * 其餘所有 contig(random/alt/Un/HLA/EBV) → passthrough（非破壞性，一個都不能漏）
  *   座標與 postprocessing.nf 的 hg38_ploidy.txt 一致；要改請兩邊一起改。
  *
  *   分片各用單一工具容器（符合本 pipeline 慣例）：
@@ -63,6 +64,12 @@ def buildPhaseShards(sex) {
         sh << ['chrY', 'pass']
     }
     sh << ['chrM', 'pass']
+    // 其餘所有 contig（chr*_random / chrUn_* / *_alt / HLA-* / chrEBV …）一律
+    // passthrough：這些非主要 contig 不 phase，但「必須保留」，否則會被上面的
+    // -r 分片整批漏掉（實測一個 WGS 樣本掉了 ~128k 個變異，破壞非破壞性保證）。
+    // 用 bcftools -t 的補集語法（^ 開頭）一次收齊，contig 層級不會有邊界重疊問題。
+    def primary = ((1..22).collect { "chr${it}" } + ['chrX', 'chrY', 'chrM']).join(',')
+    sh << ["^${primary}".toString(), 'pass']
     return sh.withIndex().collect { e, i -> [e[0], e[1], i] }
 }
 
@@ -83,8 +90,13 @@ process WHATSHAP_SUBSET {
 
     script:
     """
-    # region 可含多段（逗號分隔，如男性 chrX PAR1,PAR2）；bcftools -r 支援。
-    bcftools view -r ${region} ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz
+    # 一般區段用 -r（走 tabix 索引較快，可含逗號多段，如男性 chrX PAR1,PAR2）；
+    # 補集區段（^ 開頭，收其餘所有 contig）用 -t——-r 不支援 ^ 補集語法。
+    # 用 POSIX case 判斷，不依賴 bash [[ ]]（容器 shell 未必是 bash）。
+    case "${region}" in
+      ^*) bcftools view -t "${region}" ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz ;;
+      *)  bcftools view -r "${region}" ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz ;;
+    esac
     tabix -p vcf ${meta.id}.s${idx}.sub.vcf.gz
     """
 }
