@@ -25,51 +25,82 @@
  *   - 由 params.run_phasing 開關，預設 false（在 DGX 驗證後再開）。
  *   - ensemble 是雙樣本(_DV/_HC)；WhatsHap 需單一樣本，故 --sample <id>_HC
  *     （HaplotypeCaller 有 local assembly，最可能把 compound 拆成相鄰兩筆）。
- *   - 拆成兩個 process、各用單一工具容器（符合本 pipeline 慣例）：
- *       WHATSHAP_PHASE → whatshap 容器（可直接由 biocontainer 轉 sif，無需自建）
- *       WHATSHAP_INDEX → 既有 bcftools 容器（tabix 建索引 + publish）
+ *   - 依 contig 平行(scatter)以控制 WGS 執行時間；phase block 受 read 連通性限制，
+ *     本來就是 local，per-contig 與全基因體結果等價（phase set 不跨 contig）。
+ *   - 三個 process、各用單一工具容器（符合本 pipeline 慣例）：
+ *       WHATSHAP_SUBSET → bcftools（切出單一 contig）
+ *       WHATSHAP_PHASE  → whatshap（可直接由 biocontainer 轉 sif，無需自建）
+ *       WHATSHAP_CONCAT → bcftools（合併各 contig + 建索引 + publish）
  */
 
 // ─────────────────────────────────────────────────────────────
-// WhatsHap phasing（whatshap 容器；只需 whatshap）
+// 切出單一 contig（bcftools 容器）
 // ─────────────────────────────────────────────────────────────
-process WHATSHAP_PHASE {
-    tag "${meta.id}"
-    label 'process_medium'
+process WHATSHAP_SUBSET {
+    tag "${meta.id}:${contig}"
+    label 'process_low'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
-    path fasta
-    path fasta_fai
+    tuple val(meta), path(vcf), path(tbi), val(contig)
 
     output:
-    tuple val(meta), path("${meta.id}.ensemble.phased.vcf.gz")
+    tuple val(meta), val(contig),
+          path("${meta.id}.${contig}.sub.vcf.gz"),
+          path("${meta.id}.${contig}.sub.vcf.gz.tbi")
 
     script:
     """
-    # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
-    # whatshap 會輸出 bgzip 壓縮 VCF（副檔名 .gz）；index 交給下一個 process（bcftools 容器）。
-    # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
-    whatshap phase \\
-        --reference ${fasta} \\
-        --ignore-read-groups \\
-        --sample ${meta.id}_HC \\
-        -o ${meta.id}.ensemble.phased.vcf.gz \\
-        ${vcf} ${bam}
+    # header 含全部 contig，故即使該 contig 無變異也只是輸出空 VCF（exit 0）。
+    bcftools view -r ${contig} ${vcf} -Oz -o ${meta.id}.${contig}.sub.vcf.gz
+    tabix -p vcf ${meta.id}.${contig}.sub.vcf.gz
     """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 建 tabix 索引 + publish（既有 bcftools 容器）
+// 單一 contig phasing（whatshap 容器；只需 whatshap）
 // ─────────────────────────────────────────────────────────────
-process WHATSHAP_INDEX {
+process WHATSHAP_PHASE {
+    tag "${meta.id}:${contig}"
+    label 'process_medium'
+
+    input:
+    tuple val(meta), val(contig), path(sub_vcf), path(sub_tbi), path(bam), path(bai)
+    path fasta
+    path fasta_fai
+
+    output:
+    tuple val(meta), path("${meta.id}.${contig}.phased.vcf.gz")
+
+    script:
+    """
+    # 空 contig（header 有但無變異，如 chrM / 女性 chrY）直接輸出，避免 whatshap 對空檔報錯。
+    # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
+    if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
+        # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
+        # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
+        whatshap phase \\
+            --reference ${fasta} \\
+            --ignore-read-groups \\
+            --sample ${meta.id}_HC \\
+            -o ${meta.id}.${contig}.phased.vcf.gz \\
+            ${sub_vcf} ${bam}
+    else
+        cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
+    fi
+    """
+}
+
+// ─────────────────────────────────────────────────────────────
+// 合併各 contig + 建索引 + publish（bcftools 容器）
+// ─────────────────────────────────────────────────────────────
+process WHATSHAP_CONCAT {
     tag "${meta.id}"
     label 'process_low'
 
     publishDir "${params.out_dir}/${meta.id}/04_snv_indel", mode: 'copy'
 
     input:
-    tuple val(meta), path(phased_vcf)
+    tuple val(meta), path(phased_vcfs)
 
     output:
     tuple val(meta),
@@ -78,7 +109,13 @@ process WHATSHAP_INDEX {
 
     script:
     """
+    # whatshap 輸出的分片未建索引；concat -a 需要索引，先各自建 tbi。
+    for f in ${phased_vcfs}; do tabix -f -p vcf \$f; done
+    # -a 允許任意順序/重疊；再 sort 保證輸出座標有序。
+    bcftools concat -a ${phased_vcfs} -Oz -o concat.vcf.gz
+    bcftools sort concat.vcf.gz -Oz -o ${meta.id}.ensemble.phased.vcf.gz
     tabix -p vcf ${meta.id}.ensemble.phased.vcf.gz
+    rm -f concat.vcf.gz
     """
 }
 
@@ -93,13 +130,22 @@ workflow PHASE_ENSEMBLE {
     fasta_fai
 
     main:
-    ch_in = ensemble_ch
-        .join(bam_ch, by: 0)
-        .map { meta, vcf, tbi, bam, bai, recal -> [meta, vcf, tbi, bam, bai] }
+    ch_contigs = Channel.fromList(params.phasing_contigs)
 
-    WHATSHAP_PHASE(ch_in, fasta, fasta_fai)
-    WHATSHAP_INDEX(WHATSHAP_PHASE.out)
+    // 每個樣本 × 每個 contig 切檔
+    WHATSHAP_SUBSET(ensemble_ch.combine(ch_contigs))
+
+    // 併回該樣本的 BAM 後 phasing
+    ch_phase_in = WHATSHAP_SUBSET.out
+        .combine(bam_ch, by: 0)
+        .map { meta, contig, sv, st, bam, bai, recal -> [meta, contig, sv, st, bam, bai] }
+    WHATSHAP_PHASE(ch_phase_in, fasta, fasta_fai)
+
+    // 依 meta 收齊所有 contig（size = contig 數，因每個 contig 都會產出一份）後合併
+    ch_concat_in = WHATSHAP_PHASE.out
+        .groupTuple(by: 0, size: params.phasing_contigs.size())
+    WHATSHAP_CONCAT(ch_concat_in)
 
     emit:
-    vcf = WHATSHAP_INDEX.out.vcf   // tuple(meta, phased_vcf, tbi)
+    vcf = WHATSHAP_CONCAT.out.vcf   // tuple(meta, phased_vcf, tbi)
 }
