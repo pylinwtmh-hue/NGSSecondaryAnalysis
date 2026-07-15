@@ -376,10 +376,10 @@ workflow {
         ch_mito_merge_input,
         ch_chrM_only_dict
         )
-    // MITO_FILTER 需要 autosomal coverage（NuMT filter），join mosdepth summary（依樣本配對）
-    ch_mito_filter_input = MITO_MERGE.out.vcf.join(ch_mosdepth_summary, by: 0)
+    // MITO_FILTER：GATK 4.6 的 FilterMutectCalls 已無 --autosomal-coverage，
+    // 不再需要 mosdepth summary（NuMT 過濾靠 --mitochondria-mode + blacklist mask）。
     MITO_FILTER(
-        ch_mito_filter_input,
+        MITO_MERGE.out.vcf,
         ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
         ch_chrM_blacklist,
         file("${params.chrM_blacklist}.idx")

@@ -69,7 +69,7 @@ Two issues were raised by the department after the first evaluation:
 | CNVkit call | `modules/cnv_sv.nf` | `--filter cn` | (removed) | over-aggressive for germline |
 | VQSR SNP | `modules/variant_calling.nf` | no `DP` | `-an DP` | Broad WGS SNP recommendation |
 | CPU HaplotypeCaller | `modules/variant_calling.nf` | `--BQSR` (removed in GATK4) | `ApplyBQSR` step | gatk#6041 (dead fallback path) |
-| mtDNA filter | `modules/mitochondria.nf` | no NuMT filter | `--autosomal-coverage` from mosdepth | Broad mtDNA best-practice |
+| mtDNA filter | `modules/mitochondria.nf` | (no change) | `--mitochondria-mode` + blacklist mask | `--autosomal-coverage` was **tried but reverted**: it was removed from GATK 4.6 `FilterMutectCalls` (errors out) and Broad's current mito WDL doesn't use it. NuMT filtering = mitochondria-mode + blacklist mask |
 | Alignment | `modules/alignment.nf` | `-Y` | `-Y -K 100000000` | thread-deterministic bwa |
 | gCNV hyperparams | `nextflow_pon.config` + `modules/pon.nf` | p-alt 1e-3, coherence 1000 | **p-alt 5e-4, coherence 10000, p-active 1e-1** | Broad germline-CNV WDL defaults |
 
