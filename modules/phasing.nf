@@ -25,6 +25,9 @@
  *   - 由 params.run_phasing 開關，預設 false（在 DGX 驗證後再開）。
  *   - ensemble 是雙樣本(_DV/_HC)；WhatsHap 需單一樣本，故 --sample <id>_HC
  *     （HaplotypeCaller 有 local assembly，最可能把 compound 拆成相鄰兩筆）。
+ *   - 只 phase 體染色體(chr1-22)。性染色體在二級 +fixploidy 後為混合/單倍體
+ *     （男性 chrX：PAR diploid + 非PAR haploid → whatshap PloidyError），chrY/chrM haploid
+ *     無從 phase → chrX/chrY/chrM 一律 passthrough（保留變異、不加 PS）。
  *   - 依 contig 平行(scatter)以控制 WGS 執行時間；phase block 受 read 連通性限制，
  *     本來就是 local，per-contig 與全基因體結果等價（phase set 不跨 contig）。
  *   - 三個 process、各用單一工具容器（符合本 pipeline 慣例）：
@@ -73,20 +76,33 @@ process WHATSHAP_PHASE {
 
     script:
     """
-    # 空 contig（header 有但無變異，如 chrM / 女性 chrY）直接輸出，避免 whatshap 對空檔報錯。
-    # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
-    if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
-        # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
-        # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
-        whatshap phase \\
-            --reference ${fasta} \\
-            --ignore-read-groups \\
-            --sample ${meta.id}_HC \\
-            -o ${meta.id}.${contig}.phased.vcf.gz \\
-            ${sub_vcf} ${bam}
-    else
-        cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
-    fi
+    # 只 phase 體染色體（diploid）。性染色體在二級 +fixploidy 後為「混合/單倍體」：
+    #   男性 chrX = PAR diploid + 非PAR haploid → whatshap 會報 PloidyError(2 and 1)；
+    #   chrY / chrM = haploid，本來就無從 phase。
+    # 因此 chrX/chrY/chrM（及其它非 chr1-22）一律 passthrough：保留變異、不加 PS、不進 whatshap。
+    # （臨床 compound 幾乎都在體染色體；性染色體 phasing 為未來 sex-aware 再議。）
+    case "${contig}" in
+        chr[1-9]|chr1[0-9]|chr2[0-2])
+            # 體染色體：有變異才 phase，空 contig 直接輸出（避免 whatshap 對空檔報錯）。
+            # 用容器內建的 python（whatshap 依賴）判斷有無非表頭列，不需 bcftools。
+            if python3 -c "import gzip,sys; sys.exit(0 if any(not l.startswith('#') for l in gzip.open('${sub_vcf}','rt')) else 1)"; then
+                # ensemble 為雙樣本(_DV/_HC)：--ignore-read-groups 時需指定單一 sample（選 _HC）。
+                # --reference 開啟 re-alignment，對 indel phasing 較準（需 ${fasta}.fai）。
+                whatshap phase \\
+                    --reference ${fasta} \\
+                    --ignore-read-groups \\
+                    --sample ${meta.id}_HC \\
+                    -o ${meta.id}.${contig}.phased.vcf.gz \\
+                    ${sub_vcf} ${bam}
+            else
+                cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
+            fi
+            ;;
+        *)
+            # 性染色體 / chrM / 其它：passthrough，不 phase。
+            cp ${sub_vcf} ${meta.id}.${contig}.phased.vcf.gz
+            ;;
+    esac
     """
 }
 
