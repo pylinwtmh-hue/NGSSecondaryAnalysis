@@ -1525,3 +1525,10 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     `cp` passthrough → **輸出完全沒 phase（連 autosome 都沒 PS）卻不報錯**。症狀：`ensemble.phased.vcf.gz`
     所有 het 的 PS 都是 `.`、header 沒有 `##FORMAT=<ID=PS>`。解法：拿掉空檔判斷，diploid 分片直接
     跑 whatshap（phase 分片本就有變異；真空檔就讓它 fail loud）。診斷：`bcftools view -h ... | grep -iE 'whatshap|ID=PS'` 若空 = whatshap 從沒執行。
+39. **WhatsHap phasing 會漏掉「非主要 contig」的變異（非破壞性破功）**：`buildPhaseShards()` 舊版只切
+    `chr1-22 / X / Y / M`，其餘 `*_alt / *_random / chrUn_* / *_decoy / HLA-*` 上的變異被 `bcftools view -r`
+    整批丟掉 —— 實測一個 WGS 樣本掉了 **128,827 個（≈2.2%）**。症狀：`bcftools view -H` 比對
+    `ensemble.fixed`（phasing 前）與 `ensemble.phased`（phasing 後）的變異數不相等（後者較少）。解法：加一個
+    「其餘所有 contig」的 passthrough 分片，用 `bcftools -t` 的**補集語法** `^chr1,…,chrM`（`-r` 不支援 `^`）；
+    `WHATSHAP_SUBSET` 用 POSIX `case` 判斷 —— `^` 開頭走 `-t`（補集）、其餘走 `-r`（索引較快）。contig 層級
+    的補集不會有邊界重疊，這些非主要 contig 原樣保留、不 phase（不加 PS）。驗收：phasing 前後變異數必須相等。
