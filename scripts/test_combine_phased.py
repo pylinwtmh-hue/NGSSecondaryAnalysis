@@ -83,6 +83,26 @@ def test_isolated_passthrough():
     print("PASS test_isolated_passthrough")
 
 
+def test_trim_alleles():
+    # padding removal: GAAA>GAA -> GA>G (pos unchanged); SNV stays
+    assert C.trim_alleles(31998950, "GAAA", ["GAA"]) == (31998950, "GA", ["G"])
+    assert C.trim_alleles(31998953, "A", ["T"]) == (31998953, "A", ["T"])
+    print("PASS test_trim_alleles")
+
+
+def test_suz12_dv_after_trim():
+    # DV raw: GAAA>GAA (del one A) + A>T (SNV); WITHOUT trim they falsely overlap
+    # at 31998953 and the SNV is dropped. Trim first -> correct GAAA>GAT.
+    fetch = mkfetch({"chr17": (31998950, "GAAA")})
+    raw = [(31998950, "GAAA", ["GAA"]), (31998953, "A", ["T"])]
+    vs = []
+    for p, r, a in raw:
+        tp, tr, ta = C.trim_alleles(p, r, a)
+        vs.append(C.Var("chr17", tp, tr, ta, "L", alleles=[0, 1], phased=True, ps="P"))
+    assert C.reconstruct(C.cluster_vars(vs, 2)[0], fetch) == (31998950, "GAAA", ["GAT"], [0, 1])
+    print("PASS test_suz12_dv_after_trim -> GAAA>GAT (SNV preserved)")
+
+
 def test_footprint_beats_pos_distance():
     v1 = C.Var("chr5", 1000, "ACGT", ["A"], "L", alleles=[0, 1], phased=True, ps="P")
     v2 = C.Var("chr5", 1003, "T", ["TA"], "L", alleles=[0, 1], phased=True, ps="P")
@@ -97,5 +117,7 @@ if __name__ == "__main__":
     test_hom_hom()
     test_overlap_opposite_hap_1_2()
     test_isolated_passthrough()
+    test_trim_alleles()
+    test_suz12_dv_after_trim()
     test_footprint_beats_pos_distance()
     print("\nALL TESTS PASSED")

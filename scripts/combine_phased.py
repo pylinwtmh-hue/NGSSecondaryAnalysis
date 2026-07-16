@@ -130,6 +130,24 @@ class Var:
         return haps[0] if len(haps) == 1 else None
 
 
+def trim_alleles(pos: int, ref: str, alts: List[str]):
+    """
+    Ref-free 最小化（右修剪→左修剪），只處理 biallelic。移除 caller 表示法裡的
+    「padding」參考鹼基，避免非真正重疊被誤判成重疊（如 DV 的 GAAA>GAA →修剪為
+    GA>G，就不會假性蓋到 31998953 的 SNV）。symbolic/spanning ALT 不動。
+    """
+    if len(alts) != 1:
+        return pos, ref, alts
+    alt = alts[0]
+    if not ref or not alt or alt.startswith("<") or alt == "*" or "]" in alt or "[" in alt:
+        return pos, ref, alts
+    while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while len(ref) > 1 and len(alt) > 1 and ref[0] == alt[0]:
+        ref, alt, pos = ref[1:], alt[1:], pos + 1
+    return pos, ref, [alt]
+
+
 def parse_gt(fmt_keys: List[str], sample_vals: List[str]):
     d = dict(zip(fmt_keys, sample_vals))
     gt = d.get("GT", ".")
@@ -303,7 +321,9 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             fmt_keys = f[8].split(":") if len(f) > 8 else []
             sample_vals = f[9 + sample_col].split(":") if len(f) > 9 + sample_col else []
             alleles, phased, ps = parse_gt(fmt_keys, sample_vals)
-            v = Var(chrom, pos, ref, alt.split(","), line,
+            # 最小化後再參與叢集/重建（移除 padding 假性重疊）；passthrough 仍用原始 line。
+            tpos, tref, talts = trim_alleles(pos, ref, alt.split(","))
+            v = Var(chrom, tpos, tref, talts, line,
                     alleles=alleles, phased=phased, ps=ps)
             if chrom not in chrom_vars:
                 chrom_vars[chrom] = []
