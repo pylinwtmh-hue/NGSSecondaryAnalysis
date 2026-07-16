@@ -1516,9 +1516,9 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
 32. PYTENSOR_FLAGS 在 DGX-2 的所有 gCNV 相關 process 都需要（PON 和 case mode），原因是 DGX-2 的 singularity runOptions 沒有 bind /home，導致容器內 /home/n101569 是唯讀的。本機因為有 bind /home 所以不受影響。
 33. **GCNV_COHORT scatter shard 撞名**：IntervalListTools 切出的每個 shard 檔名都叫 `scattered.interval_list`；若用 `interval_shard.baseName` 命名輸出，39 個 shard 會全部輸出到 `gcnv_model_shard_scattered` / `cohort_scattered-model` 互相覆蓋 → 模型只剩 1 個 shard。解法：channel 帶入 index（`tuple val(idx), path(interval_shard)`），用 idx 命名 → `gcnv_model_shard_0..38`、`cohort_0-model..cohort_38-model`。case mode 的 `*-model` glob 靠這些唯一名稱才收得齊 39 個。
 34. **FilterMutectCalls 在 GATK 4.6 沒有 `--autosomal-coverage`**（舊版才有，用於 polymorphic NuMT filter；亦見第 5 點的 median 版）。誤加會報 `autosomal-coverage is not a recognized option`，讓每個 case 的 MITO_FILTER 掛掉。Broad 現行 mito WDL 也不用它 → mito 過濾只靠 `--mitochondria-mode` + VariantFiltration blacklist mask。
-35. **WhatsHap phasing（`--run_phasing`，NCKUH 專用）**：ensemble 是雙樣本(_DV/_HC)，whatshap 需 `--ignore-read-groups --sample <id>_HC`（phase HaplotypeCaller 欄，它 local assembly 最會把 compound 拆成相鄰兩筆）。biocontainer 只含 whatshap，故切 contig/合併/索引用 bcftools 容器、phase 用 whatshap 容器（per-contig scatter）。非破壞性（只加 PS），DRAGEN 自帶 PS 不走這條。
+35. **WhatsHap phasing（`--run_phasing`，NCKUH 專用）** — ⚠️ **架構已改為「ensemble merge 前、各 caller 各自 phase + combine」，見 #40；以下為舊版 post-merge 做法，保留作歷史脈絡**：ensemble 是雙樣本(_DV/_HC)，whatshap 需 `--ignore-read-groups --sample <id>_HC`（phase HaplotypeCaller 欄，它 local assembly 最會把 compound 拆成相鄰兩筆）。biocontainer 只含 whatshap，故切 contig/合併/索引用 bcftools 容器、phase 用 whatshap 容器（per-contig scatter）。非破壞性（只加 PS），DRAGEN 自帶 PS 不走這條。
 36. **PON 就位建議用 `install_pon.sh`**（verify → 備份舊版 → mv 新版就位 → rollback）；PON samplesheet 用 `subsample_pon.py`（依 run 日期取最近 + 男女均衡 + 依 sample 去重，建議 ~100–150 個同 assay 樣本）；PON 建置監控用 `monitor_pon.sh`。
-37. **WhatsHap 對混合倍體染色體會報 `PloidyError: Inconsistent ploidy (2 and 1)`**：ensemble 經二級 `bcftools +fixploidy` 後，男性 chrX 為 PAR diploid + 非PAR haploid（混合倍體），whatshap 要求單一染色體倍體一致 → 解析 chrX 時崩潰（跑完所有體染色體後才爆，浪費數小時）。解法（sex-aware，見 `buildPhaseShards()`）：只把 **diploid 區段**送 whatshap、haploid 段 passthrough —— 體染色體全 phase；女性/unknown chrX 全長 phase；男性 chrX 只 phase PAR1(1-2781479)+PAR2(155701383-156030895)、非PAR/chrY passthrough；chrM passthrough。倍體切法與 `postprocessing.nf` 的 `hg38_ploidy.txt` 一致，**兩邊要改需一起改**。分片數因性別而異（男 26 / 女 25），故 groupTuple 不指定 size。
+37. **WhatsHap 對混合倍體染色體會報 `PloidyError: Inconsistent ploidy (2 and 1)`** — ⚠️ **已被 #40 取代：phasing 移到 `+fixploidy` 之前，原始 caller VCF 全基因體皆 diploid → 不再有此錯、也不需 sex-aware 切分。以下為歷史脈絡**：ensemble 經二級 `bcftools +fixploidy` 後，男性 chrX 為 PAR diploid + 非PAR haploid（混合倍體），whatshap 要求單一染色體倍體一致 → 解析 chrX 時崩潰（跑完所有體染色體後才爆，浪費數小時）。解法（sex-aware，見 `buildPhaseShards()`）：只把 **diploid 區段**送 whatshap、haploid 段 passthrough —— 體染色體全 phase；女性/unknown chrX 全長 phase；男性 chrX 只 phase PAR1(1-2781479)+PAR2(155701383-156030895)、非PAR/chrY passthrough；chrM passthrough。倍體切法與 `postprocessing.nf` 的 `hg38_ploidy.txt` 一致，**兩邊要改需一起改**。分片數因性別而異（男 26 / 女 25），故 groupTuple 不指定 size。
 38. **在 whatshap 容器裡做 `python3 -c` 空檔判斷會靜默失敗**：原本 WHATSHAP_PHASE 用
     `if python3 -c "...有無變異..."; then whatshap; else cp; fi` 想跳過空 contig。但 whatshap
     biocontainer 內 `python3` 環境不一定可用/該 one-liner 可能出錯 → `if` 為假 → 每個分片都走
@@ -1531,4 +1531,27 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     `ensemble.fixed`（phasing 前）與 `ensemble.phased`（phasing 後）的變異數不相等（後者較少）。解法：加一個
     「其餘所有 contig」的 passthrough 分片，用 `bcftools -t` 的**補集語法** `^chr1,…,chrM`（`-r` 不支援 `^`）；
     `WHATSHAP_SUBSET` 用 POSIX `case` 判斷 —— `^` 開頭走 `-t`（補集）、其餘走 `-r`（索引較快）。contig 層級
-    的補集不會有邊界重疊，這些非主要 contig 原樣保留、不 phase（不加 PS）。驗收：phasing 前後變異數必須相等。
+    的補集不會有邊界重疊，這些非主要 contig 原樣保留、不 phase（不加 PS）。驗收：變異數應相等（註：
+    此「數量相等」針對 contig 涵蓋；開啟 compound 合成後最終數量會**略降**，見 #40）。
+40. **compound 合成架構（現行；取代 #35/#37 的 post-merge 做法）**：把被拆開的相鄰 cis 變異（如 SUZ12
+    `c.2168_2170delAAAinsTT`）在進三級 VEP 前合成單一 canonical MNV，讓 HGVS p. 正確
+    （`p.Glu723_Thr724delinsAla`）。
+    - **為何在 ensemble merge「之前」、各 caller 各自做**：`bcftools merge`(DV+HC) 會把兩 caller 對同一
+      compound 的不同表示法變成 **multiallelic**，而 whatshap **跳過 multiallelic** → compound 拿不到
+      phase、也無法合。故必須在「還是單一 caller、還是 biallelic」時 phase+combine。
+    - **二級（NCKUH）**：`main.nf` 對 DV/HC 原始單樣本 VCF 各自跑 `PHASE_COMBINE`（`modules/phasing.nf`）
+      = whatshap phase（單樣本用 `--ignore-read-groups`，per-contig scatter）→ `scripts/combine_phased.py`，
+      **再**進 `BCFTOOLS_ENSEMBLE`。產出的 `ensemble.fixed` 直接帶 phase(PS/`|`) + 已合成 compound；三級
+      `prepare_vcf` 照舊讀 `*.ensemble.fixed.vcf.gz`（名稱不變）。只 publish 這個 fixed，中間檔留 `work/`。
+    - **三級（DRAGEN）**：`prepare_vcf_dragen.nf` 的 `COMBINE_DRAGEN` 在 norm/tag 前跑同一支
+      `combine_phased.py`，用 DRAGEN **原生 PS**（不需 whatshap）。`params.combine_phased`（預設 true）開關。
+    - **phasing 在 `+fixploidy` 之前** → 原始 VCF 皆 diploid → 無 PloidyError → 不需 sex-aware 切分
+      （#37 作廢），只依 contig 分片（主要 contig phase、其餘 passthrough，#39 的 catch-all 仍在）；倍體由
+      後面 `+fixploidy` 校正。
+    - **`combine_phased.py`（二級/三級同一支，只用 Python 標準庫，兩 repo 各存一份需同步）**：依「參考足跡」
+      重疊或 cis gap≤`combine_max_gap`(預設 2，對齊 DRAGEN) 叢集，做局部單體重建成 MNV；只合 het cis / hom，
+      trans 不重疊不合。合前先 ref-free trim 去 padding（否則 DV 的 `GAAA>GAA`+`A>T` 會假性重疊、漏掉 SNV；
+      trim 後正確重建 `GAAA>GAT`）。實測 SUZ12：HC→`GAAA>GTT`、DV→`GAAA>GAT`，兩 caller 重建後常一致而塌成
+      單筆（COMBINED tag 記合併筆數）。單元測試：`python3 scripts/test_combine_phased.py`（9 例）。
+    - **注意**：combine 會**降低**變異數（compound 多筆→一筆），故 ensemble 變異數比未 phase 時略少（設計如此，
+      非漏變異）。驗證看特定位點（SUZ12）+ combine 的 stderr `in/out/merged_clusters`，不要用「總數相等」。
