@@ -1,6 +1,6 @@
 /*
  * =========================================================
- * WGS/WES Germline Analysis Pipeline - Phasing Module
+ * WGS/WES Germline Analysis Pipeline - Phasing + Combine Module
  * =========================================================
  * Author   : Po-Yu Lin (林伯昱)
  * Institute: Department of Neurology and
@@ -11,187 +11,204 @@
  * Copyright (c) 2026, Po-Yu Lin (林伯昱)
  * Licensed under the GNU General Public License v3.0
  *
- * DISCLAIMER: This pipeline is provided "as is" without warranty of any
- * kind. Users are solely responsible for validating and interpreting all
- * results. See LICENSE for details.
+ * DISCLAIMER: Provided "as is" without warranty. Users are solely responsible
+ * for validating and interpreting all results. See LICENSE.
  * =========================================================
  * modules/phasing.nf
  * ==================
- * 用 WhatsHap 對 NCKUH ensemble VCF 做 read-backed phasing，補上 PS phase set，
- * 讓三級能判斷「相鄰變異是否 in cis」，正確合併/註解 compound（如相鄰 del+ins）。
+ * NCKUH 專用：對「各 caller 原始單樣本 VCF」做 read-backed phasing（WhatsHap）
+ * 後，用 combine_phased.py 把相鄰/重疊的 cis 變異合成 canonical MNV —— 全部在
+ * BCFTOOLS_ENSEMBLE 合併「之前」完成（見討論）。
  *
- *   - 只用於 NCKUH（DV+HC ensemble）路徑；DRAGEN 自帶 PS，不走這裡。
- *   - 非破壞性：只加 PS + 把可 phase 的 GT 由 '/' 改為 '|'，不改變任何 variant 內容。
- *   - 由 params.run_phasing 開關，預設 false（在 DGX 驗證後再開）。
- *   - ensemble 是雙樣本(_DV/_HC)；WhatsHap 需單一樣本，故 --sample <id>_HC
- *     （HaplotypeCaller 有 local assembly，最可能把 compound 拆成相鄰兩筆）。
+ * 為什麼在 merge 之前、且各 caller 各自做？
+ *   - ensemble 是 DV/HC 聯集，兩 caller 對同一 compound 的表示法常不同，merge 會
+ *     產生 multiallelic，whatshap 跳過 multiallelic → compound 拿不到 phase。
+ *   - 在「還是單一 caller、還是 biallelic」時 phase+combine，SUZ12 這類 del+ins 才
+ *     phase 得到、也才合得成單筆（HC→GAAA>GTT、DV→GAAA>GAT）。merge 後各自 PS 仍保留。
  *
- * ── 依性別的倍體切分（sex-aware，與二級 +fixploidy 一致）─────────────────────
- *   whatshap 要求「單一染色體倍體一致」，否則報 PloidyError(2 and 1)。二級
- *   `bcftools +fixploidy` 依性別設定 chrX/chrY/chrM 倍體，所以 phasing 必須只餵
- *   「diploid 區段」給 whatshap，其餘 passthrough（保留變異、不加 PS）：
- *     * 體染色體 chr1-22            → diploid → phase
- *     * 男性 chrX PAR1(1-2781479) + PAR2(155701383-156030895) → diploid → phase
- *     * 男性 chrX 非PAR、chrY       → haploid → passthrough
- *     * 女性/unknown chrX（全長）    → diploid → phase（fixploidy 對 unknown 視為 F）
- *     * chrM                        → haploid → passthrough
- *     * 其餘所有 contig(random/alt/Un/HLA/EBV) → passthrough（非破壞性，一個都不能漏）
- *   座標與 postprocessing.nf 的 hg38_ploidy.txt 一致；要改請兩邊一起改。
+ * 為什麼不再需要 sex-aware 倍體切分？
+ *   - phasing 在 fixploidy「之前」，原始 caller VCF 全基因體皆 diploid（無混合倍體）
+ *     → 不會有 PloidyError → 不需依性別切 chrX PAR。倍體由後面 BCFTOOLS_ENSEMBLE 的
+ *     +fixploidy 校正。
  *
- *   分片各用單一工具容器（符合本 pipeline 慣例）：
- *     WHATSHAP_SUBSET → bcftools（切出該分片的區段，可含多段以逗號分隔）
- *     WHATSHAP_PHASE  → whatshap（type=phase 才 phase，type=pass 直接 cp）
- *     WHATSHAP_CONCAT → bcftools（合併所有分片 + 索引 + publish）
+ * 分片（純為平行度 + 完整性，無性別邏輯）：
+ *   - 主要 contig chr1-22/X/Y/M → 'phase'（送 whatshap）
+ *   - 其餘所有 contig（alt/decoy/random/Un/HLA）→ 'pass'（原樣保留、不 phase，非破壞性）
+ *
+ * 各分片用單一工具容器（符合本 pipeline 慣例）：
+ *   WHATSHAP_SUBSET → bcftools（切出該分片；補集用 -t ^）
+ *   WHATSHAP_PHASE  → whatshap（type=phase 才 phase；單樣本用 --ignore-read-groups）
+ *   WHATSHAP_CONCAT → bcftools（合併分片 + 索引）
+ *   COMBINE_PHASED  → tertiary_python（python3 跑 combine_phased.py + bcftools 排序/索引）
+ *
+ * 由 params.run_phasing 開關（預設 false）；DRAGEN 路徑自帶 PS，其 combine 在三級做。
  */
 
 // ─────────────────────────────────────────────────────────────
-// 依性別產生 phasing 分片：每筆 [region, type, idx]
-//   type: 'phase'（diploid，送 whatshap）/ 'pass'（haploid，直接 passthrough）
-//   男性判定與 BCFTOOLS_ENSEMBLE 一致（M / MALE），其餘（F / unknown / 空）視為女性。
+// phasing 分片：主要 contig → phase；其餘 contig（補集）→ pass
+//   回傳每筆 [region, type, idx]
 // ─────────────────────────────────────────────────────────────
-def buildPhaseShards(sex) {
-    def s = (sex ?: '').toString().toUpperCase()
-    def male = (s == 'M' || s == 'MALE')
+def phaseRegions() {
     def sh = []
     (1..22).each { sh << ["chr${it}".toString(), 'phase'] }
-    if (male) {
-        // PAR1 + PAR2 為 diploid → phase；非PAR + 尾段 + chrY 為 haploid → passthrough
-        sh << ['chrX:1-2781479,chrX:155701383-156030895'.toString(), 'phase']
-        sh << ['chrX:2781480-155701382,chrX:156030896-156040895'.toString(), 'pass']
-        sh << ['chrY', 'pass']
-    } else {
-        sh << ['chrX', 'phase']
-        sh << ['chrY', 'pass']
-    }
-    sh << ['chrM', 'pass']
-    // 其餘所有 contig（chr*_random / chrUn_* / *_alt / HLA-* / chrEBV …）一律
-    // passthrough：這些非主要 contig 不 phase，但「必須保留」，否則會被上面的
-    // -r 分片整批漏掉（實測一個 WGS 樣本掉了 ~128k 個變異，破壞非破壞性保證）。
-    // 用 bcftools -t 的補集語法（^ 開頭）一次收齊，contig 層級不會有邊界重疊問題。
+    sh << ['chrX', 'phase']
+    sh << ['chrY', 'phase']
+    sh << ['chrM', 'phase']
+    // 其餘所有 contig 一律 passthrough（非破壞性；-r 不支援 ^ 補集，SUBSET 用 -t）
     def primary = ((1..22).collect { "chr${it}" } + ['chrX', 'chrY', 'chrM']).join(',')
     sh << ["^${primary}".toString(), 'pass']
     return sh.withIndex().collect { e, i -> [e[0], e[1], i] }
 }
 
 // ─────────────────────────────────────────────────────────────
-// 切出該分片的區段（bcftools 容器）
+// 切出該分片區段（bcftools）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_SUBSET {
-    tag "${meta.id}:${region}"
+    tag "${meta.id}:${caller}:${region}"
     label 'process_low'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), val(region), val(type), val(idx)
+    tuple val(meta), val(caller), path(vcf), path(tbi), val(region), val(type), val(idx)
 
     output:
-    tuple val(meta), val(idx), val(type),
-          path("${meta.id}.s${idx}.sub.vcf.gz"),
-          path("${meta.id}.s${idx}.sub.vcf.gz.tbi")
+    tuple val(meta), val(caller), val(idx), val(type),
+          path("${meta.id}.${caller}.s${idx}.sub.vcf.gz"),
+          path("${meta.id}.${caller}.s${idx}.sub.vcf.gz.tbi")
 
     script:
     """
-    # 一般區段用 -r（走 tabix 索引較快，可含逗號多段，如男性 chrX PAR1,PAR2）；
-    # 補集區段（^ 開頭，收其餘所有 contig）用 -t——-r 不支援 ^ 補集語法。
-    # 用 POSIX case 判斷，不依賴 bash [[ ]]（容器 shell 未必是 bash）。
+    # 一般 contig 用 -r（走索引）；補集（^ 開頭，收其餘 contig）用 -t（-r 不支援 ^）。
     case "${region}" in
-      ^*) bcftools view -t "${region}" ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz ;;
-      *)  bcftools view -r "${region}" ${vcf} -Oz -o ${meta.id}.s${idx}.sub.vcf.gz ;;
+      ^*) bcftools view -t "${region}" ${vcf} -Oz -o ${meta.id}.${caller}.s${idx}.sub.vcf.gz ;;
+      *)  bcftools view -r "${region}" ${vcf} -Oz -o ${meta.id}.${caller}.s${idx}.sub.vcf.gz ;;
     esac
-    tabix -p vcf ${meta.id}.s${idx}.sub.vcf.gz
+    tabix -p vcf ${meta.id}.${caller}.s${idx}.sub.vcf.gz
     """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 分片 phasing（whatshap 容器；type=phase 才 phase）
+// 分片 phasing（whatshap；type=phase 才 phase）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_PHASE {
-    tag "${meta.id}:s${idx}(${type})"
+    tag "${meta.id}:${caller}:s${idx}(${type})"
     label 'process_medium'
 
     input:
-    tuple val(meta), val(idx), val(type), path(sub_vcf), path(sub_tbi), path(bam), path(bai)
+    tuple val(meta), val(caller), val(idx), val(type), path(sub_vcf), path(sub_tbi), path(bam), path(bai)
     path fasta
     path fasta_fai
 
     output:
-    tuple val(meta), path("${meta.id}.s${idx}.phased.vcf.gz")
+    tuple val(meta), val(caller), path("${meta.id}.${caller}.s${idx}.phased.vcf.gz")
 
     script:
     if (type == 'phase')
         """
-        # diploid 分片直接 phase。不做「python 空檔判斷」——它會因容器內 python 環境差異
-        # 而靜默 fallback 成 cp，造成「沒 phase 卻不報錯、autosome 也沒 PS」（本 bug）。
-        # 體染色體 / chrX-diploid 分片本就有變異，不需空檔判斷；真的空檔就讓它報錯（fail loud）。
-        # --ignore-read-groups 時需指定單一 sample（選 _HC）；--reference 開 re-alignment 對 indel 較準。
+        # 單一樣本 VCF：--ignore-read-groups 就把全部 reads 指到該唯一樣本，不必 --sample。
+        # --reference 開 re-alignment 對 indel phasing 較準。空 contig 不會報錯（原樣輸出）。
         whatshap phase \\
             --reference ${fasta} \\
             --ignore-read-groups \\
-            --sample ${meta.id}_HC \\
-            -o ${meta.id}.s${idx}.phased.vcf.gz \\
+            -o ${meta.id}.${caller}.s${idx}.phased.vcf.gz \\
             ${sub_vcf} ${bam}
         """
     else
         """
-        # haploid 區段（男性非PAR chrX / chrY / chrM）：passthrough，不 phase、不加 PS。
-        cp ${sub_vcf} ${meta.id}.s${idx}.phased.vcf.gz
+        # 非主要 contig：passthrough，不 phase、不加 PS。
+        cp ${sub_vcf} ${meta.id}.${caller}.s${idx}.phased.vcf.gz
         """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 合併所有分片 + 建索引 + publish（bcftools 容器）
+// 合併分片（bcftools）
 // ─────────────────────────────────────────────────────────────
 process WHATSHAP_CONCAT {
-    tag "${meta.id}"
+    tag "${meta.id}:${caller}"
     label 'process_low'
 
-    publishDir "${params.out_dir}/${meta.id}/04_snv_indel", mode: 'copy'
-
     input:
-    tuple val(meta), path(phased_vcfs)
+    tuple val(meta), val(caller), path(phased_vcfs)
 
     output:
-    tuple val(meta),
-          path("${meta.id}.ensemble.phased.vcf.gz"),
-          path("${meta.id}.ensemble.phased.vcf.gz.tbi"), emit: vcf
+    tuple val(meta), val(caller),
+          path("${meta.id}.${caller}.phased.vcf.gz"),
+          path("${meta.id}.${caller}.phased.vcf.gz.tbi")
 
     script:
     """
-    # 分片未建索引；concat -a 需要索引，先各自建 tbi。
     for f in ${phased_vcfs}; do tabix -f -p vcf \$f; done
-    # -a 允許任意順序/重疊；再 sort 保證輸出座標有序。
     bcftools concat -a ${phased_vcfs} -Oz -o concat.vcf.gz
-    bcftools sort concat.vcf.gz -Oz -o ${meta.id}.ensemble.phased.vcf.gz
-    tabix -p vcf ${meta.id}.ensemble.phased.vcf.gz
+    bcftools sort concat.vcf.gz -Oz -o ${meta.id}.${caller}.phased.vcf.gz
+    tabix -p vcf ${meta.id}.${caller}.phased.vcf.gz
     rm -f concat.vcf.gz
     """
 }
 
 // ─────────────────────────────────────────────────────────────
-// 組合 workflow：吃 ensemble VCF + alignment BAM，輸出 phased ensemble VCF
+// 合成相鄰/重疊 cis 變異為 MNV（combine_phased.py；tertiary_python 容器）
 // ─────────────────────────────────────────────────────────────
-workflow PHASE_ENSEMBLE {
+process COMBINE_PHASED {
+    tag "${meta.id}:${caller}"
+    label 'process_low'
+
+    input:
+    tuple val(meta), val(caller), path(phased_vcf), path(phased_tbi)
+    path fasta
+    path fasta_fai
+    path combine_py
+
+    output:
+    tuple val(meta), val(caller),
+          path("${meta.id}.${caller}.phased.combined.vcf.gz"),
+          path("${meta.id}.${caller}.phased.combined.vcf.gz.tbi")
+
+    script:
+    """
+    # combine_phased.py 只用 Python 標準庫，讀 bgzip VCF、自帶 faidx（讀 \${fasta}.fai）。
+    python3 ${combine_py} \\
+        --in ${phased_vcf} \\
+        --out ${meta.id}.${caller}.combined.vcf \\
+        --fasta ${fasta} \\
+        --max-gap ${params.combine_max_gap}
+    # 用 bcftools 排序 + 索引（-Oz 自帶 bgzip、index -t 免 tabix），故 tertiary_python 即可。
+    bcftools sort ${meta.id}.${caller}.combined.vcf \\
+        -Oz -o ${meta.id}.${caller}.phased.combined.vcf.gz
+    bcftools index -t ${meta.id}.${caller}.phased.combined.vcf.gz
+    rm -f ${meta.id}.${caller}.combined.vcf
+    """
+}
+
+// ─────────────────────────────────────────────────────────────
+// 組合 workflow：吃「各 caller 單樣本 VCF」+ BAM，輸出 phased+combined 單樣本 VCF
+// ─────────────────────────────────────────────────────────────
+workflow PHASE_COMBINE {
     take:
-    ensemble_ch   // tuple(meta, vcf, tbi)
+    caller_ch     // tuple(meta, caller, vcf, tbi)  caller ∈ {'DV','HC'}
     bam_ch        // tuple(meta, bam, bai, recal)  ← alignment_bundle
     fasta
     fasta_fai
+    combine_py    // file: scripts/combine_phased.py（staged，免綁定顧慮）
 
     main:
-    // 依每個樣本的性別展開分片（涵蓋全基因體：diploid→phase、haploid→pass）
-    ch_shards = ensemble_ch.flatMap { meta, vcf, tbi ->
-        buildPhaseShards(meta.sex).collect { r -> tuple(meta, vcf, tbi, r[0], r[1], r[2]) }
+    // 每個 (sample, caller) 展開成分片
+    ch_shards = caller_ch.flatMap { meta, caller, vcf, tbi ->
+        phaseRegions().collect { r -> tuple(meta, caller, vcf, tbi, r[0], r[1], r[2]) }
     }
     WHATSHAP_SUBSET(ch_shards)
 
-    // 併回該樣本的 BAM 後 phasing
+    // 併回該樣本 BAM（by meta）後 phasing
     ch_phase_in = WHATSHAP_SUBSET.out
         .combine(bam_ch, by: 0)
-        .map { meta, idx, type, sv, st, bam, bai, recal -> tuple(meta, idx, type, sv, st, bam, bai) }
+        .map { meta, caller, idx, type, sv, st, bam, bai, recal ->
+               tuple(meta, caller, idx, type, sv, st, bam, bai) }
     WHATSHAP_PHASE(ch_phase_in, fasta, fasta_fai)
 
-    // 依 meta 收齊所有分片後合併（分片數因性別而異，故不指定 size）
-    WHATSHAP_CONCAT(WHATSHAP_PHASE.out.groupTuple(by: 0))
+    // 依 (meta, caller) 收齊分片後合併
+    WHATSHAP_CONCAT(WHATSHAP_PHASE.out.groupTuple(by: [0, 1]))
+
+    // 合成 MNV
+    COMBINE_PHASED(WHATSHAP_CONCAT.out, fasta, fasta_fai, combine_py)
 
     emit:
-    vcf = WHATSHAP_CONCAT.out.vcf   // tuple(meta, phased_vcf, tbi)
+    vcf = COMBINE_PHASED.out   // tuple(meta, caller, combined_vcf, tbi)
 }
