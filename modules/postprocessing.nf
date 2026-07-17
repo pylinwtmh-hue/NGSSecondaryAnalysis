@@ -108,20 +108,29 @@ process BCFTOOLS_ENSEMBLE {
     echo "${prefix} ${prefix}_DV" > rename_dv.txt
     echo "${prefix} ${prefix}_HC" > rename_hc.txt
 
-    bcftools reheader -s rename_dv.txt ${dv_vcf} -o temp_dv.vcf.gz
-    bcftools index --tbi temp_dv.vcf.gz
-    
-    bcftools reheader -s rename_hc.txt ${hc_vcf} -o temp_hc.vcf.gz
-    bcftools index --tbi temp_hc.vcf.gz
+    bcftools reheader -s rename_dv.txt ${dv_vcf} -o rh_dv.vcf.gz
+    bcftools reheader -s rename_hc.txt ${hc_vcf} -o rh_hc.vcf.gz
 
     # -------------------------------------------------------------
-    # 2. 執行聯集合併 (Union)
+    # 2. 合併前先各自拆成 biallelic（-m -any），再做聯集合併 (Union)
     # -------------------------------------------------------------
+    # 為何先拆 biallelic：bcftools merge --merge all 在「重新合併已是 multiallelic 的
+    # 記錄」時，可能沒把某 sample 的 Number=R 欄位（尤其 FORMAT/AD）依新的 ALT union
+    # 補齊/重排 —— 實測 VAL-55 chr1:83829：HC 的 AD 只有 3 值卻需 4 值（3 ALT+REF），
+    # 三級 bcftools norm 因而報 "wrong number of fields in FMT/AD, expected 8, found 6"。
+    # 改成「先各自拆 biallelic 再 merge」＝ bcftools 標準的 biallelic→multiallelic 聯集
+    # 路徑，Number=R/A/G 會被正確處理（HC 缺的 allele 補 '.'，得到 0,6,.,2）。
+    # phasing 開啟時，combine_phased.py 產生的 MNV / 1|2 記錄也在此一併拆開。
+    bcftools norm -m -any rh_dv.vcf.gz -O z -o temp_dv.vcf.gz
+    bcftools index --tbi temp_dv.vcf.gz
+    bcftools norm -m -any rh_hc.vcf.gz -O z -o temp_hc.vcf.gz
+    bcftools index --tbi temp_hc.vcf.gz
+
     bcftools merge \\
         --merge all \\
         -O z -o ${prefix}.ensemble.raw.vcf.gz \\
         temp_dv.vcf.gz temp_hc.vcf.gz
-        
+
     bcftools index --tbi ${prefix}.ensemble.raw.vcf.gz
 
     # -------------------------------------------------------------
@@ -153,11 +162,17 @@ EOF
         -- -s sample_sex.txt -p hg38_ploidy.txt
 
     bcftools index --tbi ${prefix}.ensemble.fixed.vcf.gz
-    
+
     # -------------------------------------------------------------
-    # 5. 清理所有暫存檔
+    # 5. 發布前 preflight：確認 ensemble 可在「不用 --force」下通過 norm -m
+    #    （Number=R/A/G 欄位數正確）。壞掉就讓二級 fail loud，不把壞檔丟給三級（見回報 §8）。
     # -------------------------------------------------------------
-    rm -f rename_dv.txt rename_hc.txt temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt hg38_ploidy.txt ${prefix}.ensemble.raw.vcf.gz*
+    bcftools norm -m -any ${prefix}.ensemble.fixed.vcf.gz -O u -o /dev/null
+
+    # -------------------------------------------------------------
+    # 6. 清理所有暫存檔
+    # -------------------------------------------------------------
+    rm -f rename_dv.txt rename_hc.txt rh_dv.vcf.gz* temp_dv.vcf.gz* rh_hc.vcf.gz* temp_hc.vcf.gz* sample_sex.txt hg38_ploidy.txt ${prefix}.ensemble.raw.vcf.gz*
     """
     // # -------------------------------------------------------------
     // # 方案 B：嚴格取交集 (Intersection) -> 產出 1 個 Sample 欄位的 VCF

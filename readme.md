@@ -1555,3 +1555,13 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       單筆（COMBINED tag 記合併筆數）。單元測試：`python3 scripts/test_combine_phased.py`（9 例）。
     - **注意**：combine 會**降低**變異數（compound 多筆→一筆），故 ensemble 變異數比未 phase 時略少（設計如此，
       非漏變異）。驗證看特定位點（SUZ12）+ combine 的 stderr `in/out/merged_clusters`，不要用「總數相等」。
+41. **multiallelic 位點 `bcftools merge` 沒重排 `Number=R` 欄位 → 三級 norm 掛掉**：`BCFTOOLS_ENSEMBLE`
+    的 `bcftools merge --merge all` 在「重新合併**已是** multiallelic 的記錄」時，可能沒把某 sample 的
+    `FORMAT/AD`(Number=R) 依新 ALT union 補齊/重排。實測 VAL-55 `chr1:83829`（3 ALT）：HC 的 AD 只有
+    3 值(`0,6,2`)卻需 4 值，三級 `bcftools norm -m -any` 報 `wrong number of fields in FMT/AD, expected 8,
+    found 6`(exit 255)，整個三級掛掉。開 phasing 會**加重**（combine 產生的 MNV/`1|2` 與另一 caller
+    表示法分歧，逼出 multiallelic 再合併），但根因在 merge、raw DV+HC 也可能中。解法
+    （`modules/postprocessing.nf`）：**merge 之前先對各 caller `bcftools norm -m -any` 拆 biallelic**，
+    再 `merge --merge all` —— 這是 bcftools 標準 biallelic→multiallelic 路徑，Number=R/A/G 會正確處理
+    （HC 缺的 allele 補 `.` → `0,6,.,2`）。並在發布前加 **preflight**：`bcftools norm -m -any … -Ou -o /dev/null`，
+    壞掉就 **fail loud**、不把壞檔丟三級。**不要**用 `norm --force`（那是丟棄壞 tag，會靜默掉 AD/VAF）。
