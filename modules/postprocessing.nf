@@ -124,9 +124,15 @@ process BCFTOOLS_ENSEMBLE {
     #   解法：合併前先把兩邊 header 的 AD 強制成 Number=R（AD 本就是 per-allele），之後
     #   norm -m -any 才會正確 re-size、merge 也不再衝突。sed 對 ID=AD 那行不論原本
     #   Number 是 . / 數字 / R 一律改 R（已是 R 則無副作用）。
-    bcftools view -h rn_dv.vcf.gz | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' > hdr_dv.txt
+    # 一併把 PL 補成 Number=G（同理，PL 本就是 per-genotype；DV/HC 若對 PL 也定義不一致，
+    # 會在 AD 修好後換 PL 報同類錯。已是 G / 無 PL 行則無副作用）。
+    bcftools view -h rn_dv.vcf.gz \\
+        | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' \\
+        | sed 's/##FORMAT=<ID=PL,Number=[^,]*,/##FORMAT=<ID=PL,Number=G,/' > hdr_dv.txt
     bcftools reheader -h hdr_dv.txt rn_dv.vcf.gz -o fx_dv.vcf.gz
-    bcftools view -h rn_hc.vcf.gz | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' > hdr_hc.txt
+    bcftools view -h rn_hc.vcf.gz \\
+        | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' \\
+        | sed 's/##FORMAT=<ID=PL,Number=[^,]*,/##FORMAT=<ID=PL,Number=G,/' > hdr_hc.txt
     bcftools reheader -h hdr_hc.txt rn_hc.vcf.gz -o fx_hc.vcf.gz
 
     # 各自拆成 biallelic（AD 已是 Number=R，會被正確 re-size），再走 bcftools 標準的
