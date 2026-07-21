@@ -1556,13 +1556,23 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       單筆（COMBINED tag 記合併筆數）。單元測試：`python3 scripts/test_combine_phased.py`（9 例）。
     - **注意**：combine 會**降低**變異數（compound 多筆→一筆），故 ensemble 變異數比未 phase 時略少（設計如此，
       非漏變異）。驗證看特定位點（SUZ12）+ combine 的 stderr `in/out/merged_clusters`，不要用「總數相等」。
-41. **multiallelic 位點 `bcftools merge` 沒重排 `Number=R` 欄位 → 三級 norm 掛掉**：`BCFTOOLS_ENSEMBLE`
-    的 `bcftools merge --merge all` 在「重新合併**已是** multiallelic 的記錄」時，可能沒把某 sample 的
-    `FORMAT/AD`(Number=R) 依新 ALT union 補齊/重排。實測 VAL-55 `chr1:83829`（3 ALT）：HC 的 AD 只有
-    3 值(`0,6,2`)卻需 4 值，三級 `bcftools norm -m -any` 報 `wrong number of fields in FMT/AD, expected 8,
-    found 6`(exit 255)，整個三級掛掉。開 phasing 會**加重**（combine 產生的 MNV/`1|2` 與另一 caller
-    表示法分歧，逼出 multiallelic 再合併），但根因在 merge、raw DV+HC 也可能中。解法
-    （`modules/postprocessing.nf`）：**merge 之前先對各 caller `bcftools norm -m -any` 拆 biallelic**，
-    再 `merge --merge all` —— 這是 bcftools 標準 biallelic→multiallelic 路徑，Number=R/A/G 會正確處理
-    （HC 缺的 allele 補 `.` → `0,6,.,2`）。並在發布前加 **preflight**：`bcftools norm -m -any … -Ou -o /dev/null`，
-    壞掉就 **fail loud**、不把壞檔丟三級。**不要**用 `norm --force`（那是丟棄壞 tag，會靜默掉 AD/VAF）。
+41. **whatshap 把 DV 的 `FORMAT/AD` header 重新宣告成 `Number=.` → 與 HC 的 `Number=R` 不一致 → norm/merge 把 AD 弄壞**：
+    原始 DeepVariant 與 HaplotypeCaller 的 AD **都是** `Number=R`；但 **whatshap 輸出 phased VCF 時，把
+    DeepVariant 的 AD 重新宣告成 `Number=.`（Description 變 "Observed allele depths"），HaplotypeCaller 那邊
+    維持 `Number=R`**（實測 NA12878 的 `*.DV.phased.combined` = `Number=.`、`*.HC.phased.combined` = `Number=R`）。
+    於是兩個 `*.phased.combined.vcf.gz`（merge 的輸入）AD header 不一致，`BCFTOOLS_ENSEMBLE` 合併時 bcftools
+    警告 `Trying to combine "AD" tag definitions of different lengths`。只要有一邊非 `Number=R`，bcftools 就
+    無法把 AD 依 allele 正確處理，造成兩種當機：
+    - **拆 multiallelic 時非 R 的 AD 不被 re-size** → biallelic 卻帶多個 AD 值：NA12878 `chr1:111241360`
+      「2 alleles 卻 3 個 AD」→ `bcftools merge` 直接 `Incorrect number of FORMAT/AD values ... cannot merge`(255)。
+    - **直接合併時 AD 沒依新 ALT union 補齊** → VAL-55 `chr1:83829`（3 ALT）HC 的 AD 只 3 值卻需 4 →
+      三級 `bcftools norm -m -any` 報 `wrong number of fields in FMT/AD, expected 8, found 6`(255)，三級全掛。
+    開 phasing 會**加重**（combine 產生的 MNV/`1|2` 逼出更多 multiallelic 合併），但**根因是 AD header
+    Number 不一致**，raw DV+HC 也會中。解法（`modules/postprocessing.nf`，順序很重要）：
+    1. **先把兩 caller 的 AD header 強制成 `Number=R`**（`bcftools view -h | sed 's/…ID=AD,Number=[^,]*,/…Number=R,/'`
+       → `bcftools reheader -h`）。AD 本就是 per-allele，強制 R 正確、非 hack。
+    2. 再各自 `bcftools norm -m -any` 拆 biallelic（此時 AD 會被正確 re-size）。
+    3. 再 `bcftools merge --merge all`（標準 biallelic→multiallelic 聯集，Number=R/A/G 正確；缺的 allele 補 `.`）。
+    4. 發布前 **preflight** `bcftools norm -m -any … -Ou -o /dev/null`，壞掉就 **fail loud**、不把壞檔丟三級。
+    **不要**用 `norm --force`（那是丟棄壞 tag，會靜默掉 AD/VAF）。若之後 `PL`(Number=G) 等其他 tag 也報同類錯，
+    比照把該 tag 的 header 補成正確 Number。
