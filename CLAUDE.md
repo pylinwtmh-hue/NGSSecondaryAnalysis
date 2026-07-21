@@ -97,6 +97,60 @@ take effect on the **next case run** and do NOT need a PON rebuild.
 
 ---
 
+## Phasing + compound merging (`--run_phasing`) — 2026-07
+
+**Goal:** merge caller-split adjacent/overlapping *cis* variants (e.g. SUZ12
+`c.2168_2170delAAAinsTT`) into one canonical MNV so tertiary VEP reports the correct
+combined `p.` (`p.Glu723_Thr724delinsAla`), matching outside labs. Default **off**.
+
+**NCKUH — per caller, BEFORE the ensemble merge.** `main.nf` runs `PHASE_COMBINE`
+(`modules/phasing.nf`) on each raw single-sample caller VCF (DV, HC): `whatshap phase`
+(single-sample `--ignore-read-groups`, per-contig scatter) → `scripts/combine_phased.py`
+→ then `BCFTOOLS_ENSEMBLE`. So `ensemble.fixed` already carries phase (PS/`|`) + combined
+compounds; tertiary `prepare_vcf` reads `*.ensemble.fixed.vcf.gz` unchanged.
+- *Why before merge:* `bcftools merge` turns DV/HC's differing compound representations
+  into multiallelic, and whatshap **skips multiallelic** → the compound never gets phased.
+  Must phase+combine while still single-caller & biallelic.
+- *Why no sex-aware ploidy sharding (supersedes the old approach):* phasing runs on the
+  raw **pre-`+fixploidy`** VCFs (uniformly diploid) → no `PloidyError` → plain per-contig
+  scatter (primary contigs phased, everything else passthrough). `+fixploidy` still runs
+  in `BCFTOOLS_ENSEMBLE`.
+
+**DRAGEN — in tertiary.** `NGSTertiaryAnalysis/modules/prepare_vcf_dragen.nf`'s
+`COMBINE_DRAGEN` runs the same `combine_phased.py` using DRAGEN's **native PS** (no
+whatshap), gated by `params.combine_phased` (default true). Does NOT touch NCKUH's
+`prepare_vcf`.
+
+**`combine_phased.py`** (stdlib-only; **duplicated byte-identical in the tertiary repo —
+keep in sync**): clusters variants by reference footprint (overlap, or *cis* gap ≤
+`combine_max_gap`, default 2), local-haplotype-reconstructs each cluster into an MNV;
+het-cis / hom only, non-overlapping trans left alone; ref-free trim first to drop caller
+"padding". Tests: `python3 scripts/test_combine_phased.py`.
+
+### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
+
+`whatshap` re-declares **DeepVariant's** `AD` header as `Number=.` in the phased VCF (HC
+stays `Number=R`). That mismatch makes `bcftools norm`/`merge` mishandle `AD` → malformed
+`AD` that crashes the merge (`cannot merge`) or tertiary (`wrong number of fields in
+FMT/AD`). So `BCFTOOLS_ENSEMBLE`, per caller before merging: force `AD`→`Number=R` and
+`PL`→`Number=G` (sed the `##FORMAT` line + `bcftools reheader -h`) → `bcftools norm -m
+-any` to biallelic → `bcftools merge --merge all`. A **pre-publish preflight**
+(`bcftools norm -m -any … -Ou -o /dev/null`) makes secondary **fail loud** if any
+`Number=A/R/G` field is still malformed (protects against, e.g., `VAF` too). Never use
+`norm --force` (drops the tag → silently loses AD/VAF).
+
+**Side effects to know:** `ensemble.fixed` is now **biallelic-split** at former
+multiallelic sites (benign — tertiary's `norm -m -any` becomes a no-op). Combining
+**lowers** the variant count (compound multi-records → one MNV); validate by specific
+sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
+
+**Validation status (2026-07):** secondary confirmed (VAL55 SUZ12 → `GAAA>GTT`; NA12878
+`chr1:111241360` AD well-formed; preflight passes). Pending: tertiary NCKUH end-to-end
+`-resume` (`ADD_CALLERS_TAG`); DRAGEN combine needs a DRAGEN sample with a split compound;
+broader multi-sample validation before clinical use.
+
+---
+
 ## Conventions & gotchas
 
 - **Commercial licensing is a hard constraint.** Every default-path tool must be free for
