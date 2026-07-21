@@ -108,22 +108,33 @@ process BCFTOOLS_ENSEMBLE {
     echo "${prefix} ${prefix}_DV" > rename_dv.txt
     echo "${prefix} ${prefix}_HC" > rename_hc.txt
 
-    bcftools reheader -s rename_dv.txt ${dv_vcf} -o rh_dv.vcf.gz
-    bcftools reheader -s rename_hc.txt ${hc_vcf} -o rh_hc.vcf.gz
+    bcftools reheader -s rename_dv.txt ${dv_vcf} -o rn_dv.vcf.gz
+    bcftools reheader -s rename_hc.txt ${hc_vcf} -o rn_hc.vcf.gz
 
     # -------------------------------------------------------------
-    # 2. 合併前先各自拆成 biallelic（-m -any），再做聯集合併 (Union)
+    # 2. 統一 FORMAT/AD header 為 Number=R → 各自拆 biallelic → 聯集合併 (Union)
     # -------------------------------------------------------------
-    # 為何先拆 biallelic：bcftools merge --merge all 在「重新合併已是 multiallelic 的
-    # 記錄」時，可能沒把某 sample 的 Number=R 欄位（尤其 FORMAT/AD）依新的 ALT union
-    # 補齊/重排 —— 實測 VAL-55 chr1:83829：HC 的 AD 只有 3 值卻需 4 值（3 ALT+REF），
-    # 三級 bcftools norm 因而報 "wrong number of fields in FMT/AD, expected 8, found 6"。
-    # 改成「先各自拆 biallelic 再 merge」＝ bcftools 標準的 biallelic→multiallelic 聯集
-    # 路徑，Number=R/A/G 會被正確處理（HC 缺的 allele 補 '.'，得到 0,6,.,2）。
+    # 根因：DeepVariant 與 HaplotypeCaller 對 FORMAT/AD 的 header Number 定義「不一致」
+    #   （bcftools 警告 "combine AD tag definitions of different lengths"）。只要有一邊不是
+    #   Number=R，bcftools norm/merge 就無法把 AD 依 allele 正確拆分/重排：
+    #     - 拆 multiallelic 時，非 R 的 AD 不會被 re-size → biallelic 卻帶多個 AD 值
+    #       （NA12878 chr1:111241360：2 alleles 卻 3 個 AD → merge 失敗）；
+    #     - 直接合併時 AD 沒依新 ALT union 補齊 → 三級 norm 報 "wrong number of fields"
+    #       （VAL-55 chr1:83829）。
+    #   解法：合併前先把兩邊 header 的 AD 強制成 Number=R（AD 本就是 per-allele），之後
+    #   norm -m -any 才會正確 re-size、merge 也不再衝突。sed 對 ID=AD 那行不論原本
+    #   Number 是 . / 數字 / R 一律改 R（已是 R 則無副作用）。
+    bcftools view -h rn_dv.vcf.gz | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' > hdr_dv.txt
+    bcftools reheader -h hdr_dv.txt rn_dv.vcf.gz -o fx_dv.vcf.gz
+    bcftools view -h rn_hc.vcf.gz | sed 's/##FORMAT=<ID=AD,Number=[^,]*,/##FORMAT=<ID=AD,Number=R,/' > hdr_hc.txt
+    bcftools reheader -h hdr_hc.txt rn_hc.vcf.gz -o fx_hc.vcf.gz
+
+    # 各自拆成 biallelic（AD 已是 Number=R，會被正確 re-size），再走 bcftools 標準的
+    # biallelic→multiallelic 聯集路徑（Number=R/A/G 正確處理；某 caller 缺的 allele 補 '.'）。
     # phasing 開啟時，combine_phased.py 產生的 MNV / 1|2 記錄也在此一併拆開。
-    bcftools norm -m -any rh_dv.vcf.gz -O z -o temp_dv.vcf.gz
+    bcftools norm -m -any fx_dv.vcf.gz -O z -o temp_dv.vcf.gz
     bcftools index --tbi temp_dv.vcf.gz
-    bcftools norm -m -any rh_hc.vcf.gz -O z -o temp_hc.vcf.gz
+    bcftools norm -m -any fx_hc.vcf.gz -O z -o temp_hc.vcf.gz
     bcftools index --tbi temp_hc.vcf.gz
 
     bcftools merge \\
@@ -172,7 +183,7 @@ EOF
     # -------------------------------------------------------------
     # 6. 清理所有暫存檔
     # -------------------------------------------------------------
-    rm -f rename_dv.txt rename_hc.txt rh_dv.vcf.gz* temp_dv.vcf.gz* rh_hc.vcf.gz* temp_hc.vcf.gz* sample_sex.txt hg38_ploidy.txt ${prefix}.ensemble.raw.vcf.gz*
+    rm -f rename_dv.txt rename_hc.txt rn_dv.vcf.gz* rn_hc.vcf.gz* hdr_dv.txt hdr_hc.txt fx_dv.vcf.gz* fx_hc.vcf.gz* temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt hg38_ploidy.txt ${prefix}.ensemble.raw.vcf.gz*
     """
     // # -------------------------------------------------------------
     // # 方案 B：嚴格取交集 (Intersection) -> 產出 1 個 Sample 欄位的 VCF
