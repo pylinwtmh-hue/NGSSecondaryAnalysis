@@ -58,14 +58,7 @@ include { PARABRICKS_DEEPVARIANT;
           GATK_HAPLOTYPECALLER;
           GATK_VQSR_SNP;
           GATK_VQSR_INDEL }                 from './modules/variant_calling'
-include { CNVKIT_BATCH;
-          DELLY_GERMLINE;
-          BCFTOOLS_CONVERT_DELLY;
-          MANTA_GERMLINE;
-          GATK_COLLECT_READ_COUNTS;
-          GATK_PLOIDY_CASE;
-          GATK_GERMLINE_CNV_CASE;
-          GATK_POSTPROCESS_CNV }            from './modules/cnv_sv'
+include { CALL_CNV_SV }                     from './modules/cnv_sv'
 include { CALL_STR }                        from './modules/repeat'
 include { CALL_MITO }                       from './modules/call_mito'
 include { BGZIP_VCF as BGZIP_VCF_DV;
@@ -199,60 +192,8 @@ workflow {
         ch_filtered_hc_vcf = ch_hc_vcf_raw  // ← WES 直接用壓縮後的
     }
 
-    // Lane 3a: CNVkit (WGS only)
-    if (params.seq_type == "WGS") {
-        ch_cnvkit_pon = params.cnvkit_pon ? file(params.cnvkit_pon) : file("NO_FILE")
-        CNVKIT_BATCH(
-            ch_bam,
-            ch_dv_vcf,
-            ch_fasta,
-            ch_cnvkit_pon
-        )
-    }
-
-    // Lane 3b: Delly SV calling（替代 Manta，BSD license）
-    ch_delly_excl = params.delly_excl ? file(params.delly_excl) : file("NO_FILE")
-    DELLY_GERMLINE(ch_bam, ch_fasta, ch_fasta_fai, ch_delly_excl)
-    BCFTOOLS_CONVERT_DELLY(DELLY_GERMLINE.out.bcf)
-
-    // Lane 3b（選用）: Manta SV calling（--run_manta，預設關閉；非商用授權）
-    if (params.run_manta) {
-        MANTA_GERMLINE(ch_bam, ch_fasta, ch_fasta_fai)
-    }
-
-    // Lane 3c: gCNV (WES only，需 --run_gcnv true 且已有 PON)
-    if (params.seq_type == "WES" && params.run_gcnv) {
-        ch_gcnv_intervals    = file(params.gcnv_pon_dir)
-        ch_ploidy_model      = file(params.gcnv_ploidy_model_dir)
-        ch_model_shards_list = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir').collect()
-        ch_model_shards_flat = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir')
-        
-        GATK_COLLECT_READ_COUNTS(
-            ch_bam, ch_fasta, ch_fasta_fai, ch_fasta_dict,
-            ch_gcnv_intervals
-        )
-        GATK_PLOIDY_CASE(
-            GATK_COLLECT_READ_COUNTS.out.counts,
-            ch_ploidy_model
-        )
-        ch_gcnv_caller_in = GATK_COLLECT_READ_COUNTS.out.counts
-            .join(GATK_PLOIDY_CASE.out.ploidy_calls)
-            .combine(ch_model_shards_flat)
-
-        GATK_GERMLINE_CNV_CASE(ch_gcnv_caller_in)
-
-        ch_postprocess_in = GATK_GERMLINE_CNV_CASE.out.call_shard
-            .groupTuple()
-            .join(GATK_PLOIDY_CASE.out.ploidy_calls)
-
-        GATK_POSTPROCESS_CNV(
-            ch_postprocess_in,
-            ch_model_shards_list,
-            ch_fasta_dict
-        )
-    } else if (params.seq_type == "WGS" && params.run_gcnv) {
-    log.warn "WGS 模式不支援 gCNV，忽略 --run_gcnv 參數"
-    }
+    // Lane 3: CNV / SV（sub-workflow：CNVkit(WGS) + Delly + Manta(選) + gCNV(WES+PON)）
+    CALL_CNV_SV(ch_bam, ch_dv_vcf)
 
     // Lane 4: STR（sub-workflow：GangSTR 依染色體平行化 → 合併；選用 ExpansionHunter）
     CALL_STR(ch_bam)
