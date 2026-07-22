@@ -39,6 +39,8 @@ phased、同一個 PS、且非參考等位都落在同一條單體。trans（同
   * het 相鄰 cis（含 SUZ12 del+ins 重疊）→ 一條單體改、另一條為 ref → 0|1 的 MNV
   * hom + hom            → 兩條單體都改成同序列 → 1|1 的 MNV
   * hom + het 重疊       → 兩條單體不同 → 1|2（揭露「其實不是 hom」）
+  * haploid（男性 non-PAR chrX/chrY；整叢皆單套）→ 只重建單一單體 → GT=1 的 hemizygous
+    MNV（不帶 PS）；chrM 不走此路（多拷貝異質性，見下）
   * 孤立變異（叢集只含 1 顆）→ 原行輸出，完全不動
 
 重疊套用規則（處理如 SUZ12 的 GAAA>G 與 A>ATT 在同一單體重疊）：沿參考游標套用，
@@ -49,20 +51,22 @@ c.2168_2170delAAAinsTT。
 輸出與相依
 ----------
 * 輸入：單樣本 VCF(.gz)；輸出：未壓縮 VCF（交由 Nextflow bgzip+tabix）。
-* 合成出的 biallelic 紀錄會「繼承一顆代表變異（anchor＝叢集內參考足跡最寬的 biallelic
-  diploid 顆）」的整組 FORMAT：AD/DP/GQ/VAF/PL… 原封保留，當作該 compound 的讀取支持與
-  等位分數（符合 bug report §4：保留原始 locus 的 VAF/AD，不用 2 元 AD 重算成誤導的 1.0），
-  只覆寫 GT（重建出的 phased GT）與 PS，並在 INFO 標 COMBINED=<n>。QUAL/FILTER 沿用 anchor。
+* 合成出的 biallelic 紀錄會「繼承一顆代表變異（anchor＝叢集內參考足跡最寬、ploidy 與合成
+  結果一致的 biallelic 顆）」的整組 FORMAT：AD/DP/GQ/VAF/PL… 原封保留，當作該 compound 的
+  讀取支持與等位分數（符合 bug report §4：保留原始 locus 的 VAF/AD，不用 2 元 AD 重算成誤導
+  的 1.0），只覆寫 GT（diploid → 重建的 phased GT；haploid → GT=1，不帶 PS）與 PS，並在
+  INFO 標 COMBINED=<n>。QUAL/FILTER 沿用 anchor。
 * 下列情形「不重建、原封通過」（保留各來源紀錄原本的 AD/DP/VAF，交由下游 bcftools norm
-  拆分），以免捏造多等位深度：
+  拆分），以免捏造深度：
     (a) 叢集重建後有 2 個 ALT（1|2，如原生 multiallelic 1/2）；
-    (b) 叢集內找不到可當 anchor 的 biallelic diploid 紀錄；
-    (c) 叢集內含非 diploid（haploid，如 chrX/chrY/chrM）成分。
+    (b) 叢集內找不到可當 anchor 的 biallelic 紀錄；
+    (c) 叢集內「混 ploidy」（haploid 與 diploid 同叢）；
+    (d) chrM 的 haploid 叢集（多拷貝異質性，不宜當單一分子合）。
 * 原始（未合、孤立）紀錄一律原封輸出（保留所有 FORMAT）。
 * header 會補上 ##INFO=<ID=COMBINED> 與 ##FORMAT=<ID=PS>（若原本沒有）。
 
 ⚠️ 早期版本合成紀錄只輸出 GT:PS，會把 AD/DP/VAF 丟成 '.'（三級 DRAGEN AD 消失 bug、
-   145k+ 筆受影響）。現改為「anchor 繼承 + 多等位/haploid 退回原封通過」，兩者都保住深度。
+   145k+ 筆受影響）。現改為「anchor 繼承 + 多等位/混ploidy/chrM 退回原封通過」，都保住深度。
 """
 
 import argparse
@@ -175,6 +179,9 @@ def parse_gt(fmt_keys: List[str], sample_vals: List[str]):
 # ─────────────────────────────────────────────────────────────
 def _linkable_cis(v: Var, cluster: List[Var]) -> bool:
     """v 與 cluster 是否同一單體(cis)可合（保守）。"""
+    # haploid（單一拷貝，如男性 non-PAR chrX/chrY）：同一條上的變異一律 cis。
+    if len(v.alleles) == 1 and all(len(m.alleles) == 1 for m in cluster):
+        return True
     if v.is_hom_alt() or any(m.is_hom_alt() for m in cluster):
         return True
     # 兩邊都必須是 phased、同一 PS、同一 hap
@@ -269,9 +276,33 @@ def reconstruct(cluster: List[Var], fetch: Callable[[str, int, int], str]):
     return span_start, ref_seq, alleles[1:], gt
 
 
+def reconstruct_haploid(cluster: List[Var], fetch: Callable[[str, int, int], str]):
+    """單套（haploid）重建：只有一條單體，把叢集內所有帶 alt 的變異沿參考游標套上，
+    重建那唯一一條序列。回傳 (pos, ref, [alt], [1])（hemizygous）或 None（無 alt/無法合）。
+    永遠只會有 1 個 ALT（單套 → 不可能 1|2）。"""
+    chrom = cluster[0].chrom
+    span_start = min(v.pos for v in cluster)
+    span_end = max(v.end for v in cluster)
+    ref_seq = fetch(chrom, span_start, span_end)
+    if not ref_seq:
+        return None
+    edits = []
+    for v in cluster:
+        a = v.alleles[0] if v.alleles else 0
+        if 0 < a <= len(v.alts):
+            edits.append((v.pos, v.ref, v.alts[a - 1]))
+    if not edits:
+        return None
+    hap = build_hap(span_start, ref_seq, edits)
+    if hap == ref_seq:
+        return None
+    return span_start, ref_seq, [hap], [1]
+
+
 # ─────────────────────────────────────────────────────────────
 # I/O
 # ─────────────────────────────────────────────────────────────
+_MITO_CONTIGS = {"chrM", "chrMT", "MT", "M"}
 def _open(path: str):
     with open(path, "rb") as fh:
         magic = fh.read(2)
@@ -290,13 +321,13 @@ def _split_sample(line: str, sample_col: int):
 
 
 def _fmt_anchor(cluster: List[Var], sample_col: int) -> Optional[Var]:
-    """挑 FORMAT 捐贈者：叢集內「biallelic 且 diploid、且有 FORMAT」中足跡最寬
+    """挑 FORMAT 捐贈者：叢集內「biallelic（len(alts)==1）且有 FORMAT」中足跡最寬
     （tie → 最左）的一顆。找不到回 None（呼叫端會退回原封通過）。挑最寬是因為
     compound 的主事件（如 SUZ12 的 GAAA>G 缺失）通常足跡最寬，其 AD/DP 最能代表
-    整個 compound 的讀取支持。"""
+    整個 compound 的讀取支持。只在「同 ploidy」的叢集上呼叫，故 anchor 的 ploidy 必與
+    合成結果一致 → AD(Number=R)/PL(Number=G) 長度天生對得上（diploid 或 haploid 皆然）。"""
     cands = [v for v in cluster
-             if len(v.alts) == 1 and len(v.alleles) == 2
-             and len(_split_sample(v.line, sample_col)[1]) > 0]
+             if len(v.alts) == 1 and len(_split_sample(v.line, sample_col)[1]) > 0]
     if not cands:
         return None
     cands.sort(key=lambda v: (-len(v.ref), v.pos))
@@ -304,19 +335,26 @@ def _fmt_anchor(cluster: List[Var], sample_col: int) -> Optional[Var]:
 
 
 def _render_merged(chrom: str, pos: int, ref: str, alt: str, gtstr: str,
-                   ps: str, n_combined: int, anchor: Var, sample_col: int) -> str:
+                   ps: Optional[str], n_combined: int, anchor: Var, sample_col: int) -> str:
     """組出合成後的 biallelic 紀錄：沿用 anchor 的 QUAL/FILTER/FORMAT，只覆寫 GT、PS，
-    INFO 設 COMBINED=<n>。因 anchor 為 biallelic diploid，其 AD(Number=R)/PL(Number=G)
-    的元素數與合成後的 biallelic 一致，直接繼承即為正確長度。"""
+    INFO 設 COMBINED=<n>。因 anchor 與合成結果同 ploidy 且 biallelic，其 AD(Number=R)/
+    PL(Number=G) 元素數與合成後的 biallelic 一致，直接繼承即為正確長度。ps 為 None
+    （haploid hemizygous）時不加、也不覆寫 PS。"""
     f, keys, d = _split_sample(anchor.line, sample_col)
     qual = f[5] if len(f) > 5 else "."
     filt = f[6] if len(f) > 6 else "."
     if "GT" not in keys:
         keys = ["GT"] + keys
-    if "PS" not in keys:
+    if ps is not None and "PS" not in keys:
         keys = keys + ["PS"]
-    vals = [gtstr if k == "GT" else ps if k == "PS" else d.get(k, ".")
-            for k in keys]
+    vals = []
+    for k in keys:
+        if k == "GT":
+            vals.append(gtstr)
+        elif k == "PS":
+            vals.append(ps if ps is not None else d.get("PS", "."))
+        else:
+            vals.append(d.get(k, "."))
     return "\t".join([chrom, str(pos), ".", ref, alt, qual, filt,
                       "COMBINED=%d" % n_combined, ":".join(keys), ":".join(vals)])
 
@@ -324,7 +362,7 @@ def _render_merged(chrom: str, pos: int, ref: str, alt: str, gtstr: str,
 def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             sample_col: int = 0) -> dict:
     """主流程；回傳統計。fetch 可注入（測試用）。"""
-    stats = {"clusters_merged": 0, "clusters_fallback": 0,
+    stats = {"clusters_merged": 0, "clusters_haploid": 0, "clusters_fallback": 0,
              "records_in": 0, "records_out": 0}
     header, chrom_vars, order_chrom = [], {}, []
     fmt_extra = ['##INFO=<ID=COMBINED,Number=1,Type=Integer,'
@@ -337,26 +375,34 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
         for chrom in order_chrom:
             vs = chrom_vars[chrom]
             clusters = cluster_vars(vs, max_gap)
+            is_mito = chrom in _MITO_CONTIGS
             recs = []
             for cl in clusters:
-                # 孤立顆 / 含非 diploid 成分（haploid，chrX/Y/M）→ 原封通過，保留 FORMAT。
-                if len(cl) == 1 or any(len(v.alleles) != 2 for v in cl):
-                    for v in cl:
-                        recs.append((v.pos, v.line))
-                    if len(cl) > 1:
-                        stats["clusters_fallback"] += 1
+                if len(cl) == 1:                       # 孤立顆 → 原行輸出，完全不動
+                    recs.append((cl[0].pos, cl[0].line))
                     continue
-                res = reconstruct(cl, fetch)
+                ploidies = {len(v.alleles) for v in cl}
+                if ploidies == {2}:                    # 全 diploid → 雙單體重建
+                    res = reconstruct(cl, fetch)
+                    multi = res is not None and len(res[2]) > 1
+                elif ploidies == {1} and not is_mito:  # 全 haploid（非 chrM）→ 單套重建
+                    res, multi = reconstruct_haploid(cl, fetch), False
+                else:                                  # 混 ploidy、chrM haploid、其他 → 不合
+                    res, multi = None, False
                 anchor = _fmt_anchor(cl, sample_col)
-                # 無法重建、重建成多 ALT（1|2）、或無 biallelic anchor → 原封通過（保留 AD）。
-                if res is None or len(res[2]) > 1 or anchor is None:
+                # 無法重建 / 重建成多 ALT（1|2）/ 無 biallelic anchor → 原封通過（保留 AD）。
+                if res is None or multi or anchor is None:
                     for v in cl:
                         recs.append((v.pos, v.line))
                     stats["clusters_fallback"] += 1
                     continue
                 pos, ref, alt_list, gt = res
-                gtstr = "|".join(str(g) for g in gt)
-                ps = next((v.ps for v in cl if v.ps), str(pos))
+                if len(gt) > 1:                        # diploid：phased GT + PS
+                    gtstr = "|".join(str(g) for g in gt)
+                    ps = next((v.ps for v in cl if v.ps), str(pos))
+                else:                                  # haploid hemizygous：GT=1，不帶 PS
+                    gtstr, ps = str(gt[0]), None
+                    stats["clusters_haploid"] += 1
                 recs.append((pos, _render_merged(
                     chrom, pos, ref, alt_list[0], gtstr, ps, len(cl),
                     anchor, sample_col)))
@@ -406,9 +452,10 @@ def main():
     fa = Faidx(a.fasta)
     st = process(a.inp, a.out, fa.fetch, a.max_gap, a.sample_index)
     sys.stderr.write(
-        "[combine_phased] in=%d out=%d merged_clusters=%d passthrough_clusters=%d\n"
+        "[combine_phased] in=%d out=%d merged_clusters=%d (haploid=%d) "
+        "passthrough_clusters=%d\n"
         % (st["records_in"], st["records_out"], st["clusters_merged"],
-           st["clusters_fallback"]))
+           st["clusters_haploid"], st["clusters_fallback"]))
 
 
 if __name__ == "__main__":

@@ -167,17 +167,51 @@ def test_triallelic_passthrough_keeps_ad():
     print("PASS test_triallelic_passthrough_keeps_ad -> 1|2 kept as 2 records w/ AD")
 
 
-def test_haploid_passthrough_keeps_ad():
-    # haploid (chrX/Y/M) components can't be diploid-reconstructed -> pass through.
+def test_haploid_cis_merge():
+    # male non-PAR chrX: two adjacent hemizygous SNVs on the single copy -> one haploid MNV.
+    # GT must be hemizygous "1" (not 1|1, not phased) with NO PS, inheriting an anchor's AD.
+    fetch = mkfetch({"chrX": (1000, "CAG")})
+    recs = [
+        "chrX\t1000\t.\tC\tT\t50\tPASS\t.\tGT:AD:DP\t1:8:8",
+        "chrX\t1002\t.\tG\tA\t50\tPASS\t.\tGT:AD:DP\t1:9:9",
+    ]
+    out, st = _run_process(recs, fetch, max_gap=2)
+    assert st["clusters_merged"] == 1 and st["clusters_haploid"] == 1 and st["clusters_fallback"] == 0
+    assert len(out) == 1, out
+    f = out[0].split("\t")
+    assert (f[3], f[4]) == ("CAG", "TAA"), (f[3], f[4])
+    d = dict(zip(f[8].split(":"), f[9].split(":")))
+    assert d["GT"] == "1", d                       # hemizygous single allele
+    assert "PS" not in d, "no phase set on a single-copy call"
+    assert d["AD"] == "8" and d["DP"] == "8"       # inherited from leftmost (widest-tie) anchor
+    assert "COMBINED=2" in f[7]
+    print("PASS test_haploid_cis_merge -> CAG>TAA hemizygous GT=1, AD kept")
+
+
+def test_mixed_ploidy_passthrough():
+    # haploid + diploid in one overlapping cluster -> don't mix models, passthrough (keep AD).
     fetch = mkfetch({"chrX": (1000, "CG")})
     recs = [
-        "chrX\t1000\t.\tCG\tC\t50\tPASS\t.\tGT:AD:DP\t1:8:8",   # haploid del, ftpt 1000-1001
-        "chrX\t1001\t.\tG\tT\t50\tPASS\t.\tGT:AD:DP\t1:7:7",    # overlaps at 1001
+        "chrX\t1000\t.\tCG\tC\t50\tPASS\t.\tGT:AD:DP\t1:8:8",      # haploid, ftpt 1000-1001
+        "chrX\t1001\t.\tG\tT\t50\tPASS\t.\tGT:AD:DP\t0/1:5,6:11",  # diploid, overlaps at 1001
     ]
     out, st = _run_process(recs, fetch, max_gap=2)
     assert st["clusters_merged"] == 0 and st["clusters_fallback"] == 1
     assert len(out) == 2 and all("COMBINED" not in ln for ln in out)
-    print("PASS test_haploid_passthrough_keeps_ad -> haploid kept as-is")
+    print("PASS test_mixed_ploidy_passthrough -> mixed ploidy kept as-is")
+
+
+def test_haploid_mito_passthrough():
+    # chrM haploid adjacent variants -> NOT combined (multi-copy heteroplasmy), passthrough.
+    fetch = mkfetch({"chrM": (300, "CAG")})
+    recs = [
+        "chrM\t300\t.\tC\tT\t50\tPASS\t.\tGT:AD:DP\t1:80:100",
+        "chrM\t302\t.\tG\tA\t50\tPASS\t.\tGT:AD:DP\t1:60:100",
+    ]
+    out, st = _run_process(recs, fetch, max_gap=2)
+    assert st["clusters_merged"] == 0 and st["clusters_fallback"] == 1
+    assert len(out) == 2 and all("COMBINED" not in ln for ln in out)
+    print("PASS test_haploid_mito_passthrough -> chrM haploid kept as-is")
 
 
 def test_isolated_still_untouched():
@@ -202,6 +236,8 @@ if __name__ == "__main__":
     test_footprint_beats_pos_distance()
     test_merged_keeps_format()
     test_triallelic_passthrough_keeps_ad()
-    test_haploid_passthrough_keeps_ad()
+    test_haploid_cis_merge()
+    test_mixed_ploidy_passthrough()
+    test_haploid_mito_passthrough()
     test_isolated_still_untouched()
     print("\nALL TESTS PASSED")

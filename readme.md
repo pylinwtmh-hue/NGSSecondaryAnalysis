@@ -1586,8 +1586,12 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       phased GT）與 `PS`，`QUAL`/`FILTER` 也沿用 anchor。anchor 是 biallelic diploid，其 `AD`(R)/`PL`(G) 元素數
       與合成後 biallelic 一致 → 長度正確、不會再壞。符合 bug report §4：保留**原始 locus** 的 VAF/AD，不用 2 元 AD
       重算成誤導的 `1.0`。
-    - 三種情況**不重建、原封通過**（來源紀錄的 AD 原樣保住，交下游 `norm -m -any` 拆）：(a) 重建成 2 個 ALT
+    - **ploidy-aware 重建**：diploid 叢集重建兩條單體（phased `0|1`/`1|1`…）；**全 haploid 非 chrM** 叢集
+      （男性 non-PAR `chrX`/`chrY`）重建單套 → hemizygous `GT=1`（不帶 PS），一樣繼承 anchor 的 AD。
+    - 四種情況**不重建、原封通過**（來源紀錄的 AD 原樣保住，交下游 `norm -m -any` 拆）：(a) 重建成 2 個 ALT
       （`1|2`，含原生 multiallelic `1/2`，正是 reporter 的 `CCGGCGG→CCGG,C AD=0,28,20`）；(b) 找不到 biallelic
-      anchor；(c) 含非 diploid（haploid `chrX/chrY/chrM`）成分。
-    - stderr 由 `merged_clusters` 加報 `passthrough_clusters`。回歸測試：`test_combine_phased.py`（新增 4 例：
-      合成保留 AD/DP/AF、`1|2` 退回原封、haploid 退回原封、孤立逐字通過）。
+      anchor；(c) 混 ploidy（haploid+diploid 同叢）；(d) `chrM` haploid 叢集（多拷貝異質性，不宜當單一分子合）。
+    - stderr 由 `merged_clusters`（含 `haploid=`）加報 `passthrough_clusters`。回歸測試：`test_combine_phased.py`
+      （15 例：合成保留 AD/DP/AF、`1|2` 退回、haploid 合成 hemizygous、混 ploidy 退回、chrM 退回、孤立逐字通過）。
+    - **NCKUH combine 跑在 `+fixploidy` 之前 = 一律 diploid**，故 haploid 路實務上只在三級 DRAGEN 觸發；男性性染色體
+      compound 在二級是「diploid 合 → 之後 fixploidy 轉 haploid」，本來就有處理,三級這條是補上它原本缺的。

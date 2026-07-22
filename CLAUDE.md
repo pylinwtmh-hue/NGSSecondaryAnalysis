@@ -130,16 +130,22 @@ caller "padding". Tests: `python3 scripts/test_combine_phased.py`.
 ### ⚠️ Combined records must keep depth (`AD`/`DP`/`VAF`) — do NOT emit `GT:PS` only
 
 A combined MNV **inherits the full FORMAT of an anchor** (= the cluster's widest biallelic
-diploid record, e.g. the deletion in a del+ins compound), overwriting only `GT` (the
-reconstructed phased GT) and `PS`; `QUAL`/`FILTER` also come from the anchor. Because the
-anchor is biallelic diploid, its `AD`(Number=R)/`PL`(Number=G) element counts already match
-the biallelic MNV, so inheritance is length-correct. Per the DRAGEN bug report §4 this keeps
-the **original locus** `VAF`/`AD` rather than recomputing a misleading `1.0` from a 2-element
-`AD`. Three cases **do not reconstruct** — they pass the source records through untouched so
-their `AD` survives (downstream `bcftools norm -m -any` splits them): (a) reconstruction
-yields 2 ALTs (`1|2`, incl. native multiallelic `1/2`); (b) no biallelic anchor in the
-cluster; (c) any non-diploid (haploid `chrX/chrY/chrM`) member. The stderr line reports
-`merged_clusters` and `passthrough_clusters`.
+record, e.g. the deletion in a del+ins compound), overwriting only `GT` (the reconstructed
+GT) and `PS`; `QUAL`/`FILTER` also come from the anchor. The anchor shares the cluster's
+ploidy, so its `AD`(Number=R)/`PL`(Number=G) element counts already match the biallelic MNV,
+so inheritance is length-correct. Per the DRAGEN bug report §4 this keeps the **original
+locus** `VAF`/`AD` rather than recomputing a misleading `1.0` from a 2-element `AD`.
+
+Reconstruction is **ploidy-aware**: **diploid** clusters rebuild two haplotypes (phased
+`0|1`/`1|1`/…); **all-haploid non-mito** clusters (male non-PAR `chrX`/`chrY`) rebuild the
+single copy → hemizygous `GT=1` (no `PS`), still inheriting the anchor's AD. Four cases
+**do not reconstruct** — they pass the source records through untouched so their `AD`
+survives (downstream `bcftools norm -m -any` splits them): (a) reconstruction yields 2 ALTs
+(`1|2`, incl. native multiallelic `1/2`); (b) no biallelic anchor in the cluster; (c) mixed
+ploidy (haploid + diploid in one cluster); (d) `chrM` haploid clusters (multi-copy
+heteroplasmy — not safe to treat as one molecule). The stderr line reports `merged_clusters`
+(with `haploid=`) and `passthrough_clusters`. (NCKUH combine runs pre-`+fixploidy` =
+uniformly diploid, so the haploid path is in practice DRAGEN-only.)
 
 > The earlier version emitted only `GT:PS` on combined records, dropping `AD`/`DP`/`VAF` to
 > `.` — this silently killed depth on 145k+ phased records (DRAGEN tertiary "AD 消失" bug,
