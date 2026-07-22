@@ -150,3 +150,34 @@ process PLOIDY_CHECK {
     rm -f ${meta.id}.ploidy.vcf
     """
 }
+
+
+// ──────────────────────────────────────────────────────────────
+// ALIGNMENT_QC sub-workflow（Step 3）：SAMTOOLS_STATS + MOSDEPTH + PLOIDY_CHECK。
+//   對外只吃 bam_ch；mosdepth targets / autosome BED / ploidy_check.py 於內部依 params 建立。
+//   emit MultiQC 需要的 stats / summary / global_dist，及 ploidy QC 輸出。
+// ──────────────────────────────────────────────────────────────
+workflow ALIGNMENT_QC {
+    take:
+    bam_ch      // tuple(meta, bam, bai, ...)
+
+    main:
+    ch_mosdepth_targets = (params.seq_type == "WES") ?
+        file(params.wes_targets) : file("NO_FILE")
+    // WGS 深度 QC 只看 autosome primary contig（chr1-22）；排除 chrM/chrX/chrY/unplaced
+    ch_autosome_bed = (params.seq_type == "WGS") ?
+        file(params.autosome_bed) : file("NO_FILE")
+    ch_ploidy_py = file("${projectDir}/scripts/ploidy_check.py")
+
+    SAMTOOLS_STATS(bam_ch)
+    MOSDEPTH(bam_ch, ch_mosdepth_targets, ch_autosome_bed)
+    PLOIDY_CHECK(MOSDEPTH.out.summary, ch_ploidy_py)
+
+    emit:
+    stats       = SAMTOOLS_STATS.out.stats
+    summary     = MOSDEPTH.out.summary      // mito NuMT filter 與 MultiQC 共用
+    global_dist = MOSDEPTH.out.global_dist
+    thresholds  = MOSDEPTH.out.thresholds
+    regions     = MOSDEPTH.out.regions
+    ploidy      = PLOIDY_CHECK.out.ploidy
+}

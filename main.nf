@@ -52,7 +52,7 @@ nextflow.enable.dsl = 2
 
 include { FASTP }                           from './modules/preprocessing'
 include { PARABRICKS_FQ2BAM }               from './modules/alignment'
-include { SAMTOOLS_STATS; MOSDEPTH; PLOIDY_CHECK } from './modules/alignment_qc'
+include { ALIGNMENT_QC }                    from './modules/alignment_qc'
 include { PARABRICKS_DEEPVARIANT;
           PARABRICKS_HAPLOTYPECALLER;
           GATK_HAPLOTYPECALLER;
@@ -153,26 +153,11 @@ workflow {
     ch_bam = PARABRICKS_FQ2BAM.out.alignment_bundle
 
     // =========================================================
-    // (D) Step 3: Alignment QC
+    // (D) Step 3: Alignment QC（sub-workflow：SAMTOOLS_STATS + MOSDEPTH + PLOIDY_CHECK）
     // =========================================================
-    ch_mosdepth_targets = (params.seq_type == "WES") ?
-        file(params.wes_targets) : file("NO_FILE")
-
-    // WGS 深度 QC 只看 autosome primary contig（chr1-22）
-    // 排除 chrM（高拷貝數）、chrX/chrY（受性別影響）、unplaced contig
-    ch_autosome_bed = (params.seq_type == "WGS") ?
-        file(params.autosome_bed) : file("NO_FILE")
-
-    SAMTOOLS_STATS(ch_bam)
-    MOSDEPTH(ch_bam, ch_mosdepth_targets, ch_autosome_bed)
-    // (meta, summary.txt)：mito NuMT filter 與 MultiQC 共用同一輸出
-    ch_mosdepth_summary = MOSDEPTH.out.summary
-
-    // sex 防呆 + 每條染色體 ploidy 提示（warn-only；不改 ploidy、不中斷）。
-    //   從 mosdepth summary 推性別/ploidy，與 samplesheet 宣告的 sex 比對，
-    //   不符或疑似非整倍體 → WARN + 出 QC 檔（03_alignment_qc/*.ploidy.vcf.gz、*.ploidy_qc.txt）。
-    ch_ploidy_py = file("${projectDir}/scripts/ploidy_check.py")
-    PLOIDY_CHECK(MOSDEPTH.out.summary, ch_ploidy_py)
+    ALIGNMENT_QC(ch_bam)
+    // (meta, summary.txt)：MultiQC 用；PLOIDY_CHECK 在 sub-workflow 內部已消費同一輸出
+    ch_mosdepth_summary = ALIGNMENT_QC.out.summary
 
     // =========================================================
     // (E) Step 4: Parallel Variant Calling
@@ -355,8 +340,8 @@ workflow {
     ch_multiqc = Channel.empty()
         .mix(FASTP.out.json)
         .mix(PARABRICKS_FQ2BAM.out.qc_metrics)
-        .mix(SAMTOOLS_STATS.out.stats)
-        .mix(MOSDEPTH.out.global_dist)
+        .mix(ALIGNMENT_QC.out.stats)
+        .mix(ALIGNMENT_QC.out.global_dist)
         .mix(ch_mosdepth_summary.map { meta, f -> f })
         .mix(BCFTOOLS_STATS.out.stats)
         .mix(BCFTOOLS_STATS_ENSEMBLE.out.stats)
