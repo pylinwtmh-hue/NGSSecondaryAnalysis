@@ -1595,3 +1595,46 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       （15 例：合成保留 AD/DP/AF、`1|2` 退回、haploid 合成 hemizygous、混 ploidy 退回、chrM 退回、孤立逐字通過）。
     - **NCKUH combine 跑在 `+fixploidy` 之前 = 一律 diploid**，故 haploid 路實務上只在三級 DRAGEN 觸發；男性性染色體
       compound 在二級是「diploid 合 → 之後 fixploidy 轉 haploid」，本來就有處理,三級這條是補上它原本缺的。
+
+---
+
+## 未來進步方向（Roadmap；尚未實作，備忘）
+
+討論過、但還沒落地的中長期方向。總目標：**只要有 FASTQ，性別 / ploidy / karyotype 都應該能自動推定**，
+且**像 DRAGEN 那樣把「各有強項的多個 caller」依區域組合起來**，而不是單一 caller 全域打天下。
+
+### 1. 從 FASTQ 全自動判定性別與 ploidy（免手動填 samplesheet 的 sex）
+現況：二級 `sex` 由 samplesheet 手動填、三級沒有 sex 欄。目標從對齊後 BAM 直接推：
+- **性別**：mosdepth 的 X:autosome 覆蓋比、Y 覆蓋、X 上雜合率 → XX / XY / 其他（mosdepth 已在 `03_alignment_qc` 跑，資料現成）。
+- **karyotype / ploidy**：見第 3 點。推得的值回頭餵 `+fixploidy`、gCNV contig-ploidy、與第 2 點的 caller ploidy。
+- DRAGEN 已內建 Ploidy Estimator（輸出 `*.ploidy.vcf.gz`），NCKUH 端要自建。
+
+### 2. Ploidy-aware variant calling（目前兩個 caller 都一律 diploid，只靠事後 `+fixploidy`）
+現況：`modules/variant_calling.nf` 的 DeepVariant / HaplotypeCaller **都沒有**傳 ploidy / 性別旗標，一律
+diploid call，最後才 `bcftools +fixploidy` 修 GT。**事後修 GT 無法回復**用錯 ploidy 的誤判（男性 non-PAR
+chrX/chrY 會出現假 het，尤其 DeepVariant）。方向：
+- **HaplotypeCaller**：男性 non-PAR chrX/chrY 用 `-ploidy 1`（PAR 維持 2），interval 分片再合。
+- **DeepVariant**：`--haploid-contigs chrX,chrY` + `--par-regions-bed`（Parabricks 4.x 應支援，需確認版本旗標）。
+- 已知三倍體染色體：該染色體 `-ploidy 3` 重跑（GATK 可；DV 只 diploid/haploid；DRAGEN 存疑，非開源）。
+- ⚠️ **與 `--run_phasing` 的交互**：目前 phasing/combine 跑在 `+fixploidy` 之前、假設「一律 diploid」；改成
+  sex-aware calling 後 raw VCF 會有 haploid 區（combine 的 haploid 路已實作、會被用到），phasing 分片也要重設計。
+  屬較大的一次改動，需獨立設計；先做第 1 點（可靠判性別）才有基礎。
+
+### 3. Aneuploidy 自動偵測 + 提示（讓人知道要不要手動 `-ploidy N` 重跑）
+- **read-depth**：per-chromosome 覆蓋 z-score（chr21 ≈ 1.5×→ 三體）；沿用 mosdepth / gCNV / CNVkit。
+- **SNV BAF**：het SNV 的 B-allele fraction 正常一條帶 ~0.5，三體會分裂成 ~0.33 / 0.67 兩條帶（用到現在保住的 AD/VAF）。
+- 兩訊號一致 → QC/報告標「chrN 疑似非整倍體，本染色體 SNV 基因型可能不準，考慮 `-ploidy N` 重跑」。
+- 短期先做「sex 防呆」把性染色體 aneuploidy（XXY 等）先擋起來（見下）。
+
+### 4. 多 caller 組合，善用各自強項（像 DRAGEN）
+目前 NCKUH = DeepVariant + HaplotypeCaller ensemble（全域）。方向是納入「在特定區域更強」的 caller，
+依**區域**取捨而非全域平均：
+- **dark / 高同源 / 低複雜度區**：加對這些區域較強的 caller（或 graph-based / long-read-aware 方法）。
+- 建立 region-aware 的信心度與合併策略（confidence by region），而非單純多數決。
+
+### 近期落地步驟（近 → 遠）
+- [ ] **sex 防呆**：mosdepth X/Y 覆蓋 vs samplesheet 宣告 sex，不一致 → warn / fail-loud（最保守：不自動改 ploidy）。
+- [ ] **per-chromosome ploidy 提示**：順便輸出各染色體覆蓋 z-score + het BAF，疑似非整倍體就提示手動 `-ploidy N`。
+- [ ] **strand-bias 警示欄**（三級報告面；DV 路缺 FS/SOR 需另計，見 pitfall）。
+- [ ] 三級接 DRAGEN `*.ploidy.vcf.gz` → 性別自動化 + 性染色體 aneuploidy 標記。
+- [ ] （長期）第 2、4 點：sex-aware / ploidy-aware calling 與多 caller region-aware 組合。
