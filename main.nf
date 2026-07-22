@@ -66,9 +66,7 @@ include { CNVKIT_BATCH;
           GATK_PLOIDY_CASE;
           GATK_GERMLINE_CNV_CASE;
           GATK_POSTPROCESS_CNV }            from './modules/cnv_sv'
-include { GANGSTR_CHROM;
-          GANGSTR_MERGE;
-          EXPANSIONHUNTER }                from './modules/repeat'
+include { CALL_STR }                        from './modules/repeat'
 include { CALL_MITO }                       from './modules/call_mito'
 include { BGZIP_VCF as BGZIP_VCF_DV;
           BGZIP_VCF as BGZIP_VCF_HC;
@@ -256,38 +254,8 @@ workflow {
     log.warn "WGS 模式不支援 gCNV，忽略 --run_gcnv 參數"
     }
 
-    // Lane 4: STR (GangSTR，替代 ExpansionHunter，GPL v3 license)
-    // WGS：按染色體平行化（24 個 process），大幅縮短執行時間
-    // WES：也平行化，但 loci 較少，效果有限
-    def gangstr_regions = params.seq_type == "WES"
-        ? file(params.gangstr_regions_wes)
-        : file(params.gangstr_regions_wgs)
-
-    // 展開 24 個染色體，每個樣本 × 每條染色體 = 一個 GANGSTR_CHROM process
-    def chroms = (1..22).collect { "chr${it}" } + ["chrX", "chrY"]
-    ch_bam_chrom = ch_bam.combine(Channel.from(chroms))
-
-    GANGSTR_CHROM(ch_bam_chrom, ch_fasta, ch_fasta_fai, gangstr_regions)
-
-    // 按樣本收集 24 個 VCF，按染色體順序排序後傳入 GANGSTR_MERGE
-    ch_gangstr_vcfs = GANGSTR_CHROM.out.vcf
-        .map { meta, chrom, vcf -> [meta, chrom, vcf] }
-        .groupTuple(by: 0)
-        .map { meta, chroms_list, vcfs ->
-            // 按染色體順序排序
-            def order = (1..22).collect { "chr${it}" } + ["chrX", "chrY"]
-            def sorted_vcfs = [chroms_list, vcfs].transpose()
-                .sort { a, b -> order.indexOf(a[0]) <=> order.indexOf(b[0]) }
-                .collect { it[1] }
-            [meta, sorted_vcfs]
-        }
-
-    GANGSTR_MERGE(ch_gangstr_vcfs)
-
-    // Lane 4（選用）: ExpansionHunter（--run_expansionhunter，預設關閉；非商用授權）
-    if (params.run_expansionhunter) {
-        EXPANSIONHUNTER(ch_bam, ch_fasta, ch_fasta_fai, file(params.str_catalog))
-    }
+    // Lane 4: STR（sub-workflow：GangSTR 依染色體平行化 → 合併；選用 ExpansionHunter）
+    CALL_STR(ch_bam)
 
     // =========================================================
     // Lane 5: Mitochondria variant calling（sub-workflow）

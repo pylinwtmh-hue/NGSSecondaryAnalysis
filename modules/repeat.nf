@@ -181,3 +181,47 @@ process EXPANSIONHUNTER {
         --threads ${task.cpus}
     """
 }
+
+
+// ──────────────────────────────────────────────────────────────
+// CALL_STR sub-workflow（Lane 4）：GangSTR（依染色體平行化 → 合併）＋ 選用 ExpansionHunter。
+//   對外只吃 bam_ch；fasta / gangstr_regions / str_catalog 於內部依 params 建立。
+//   GangSTR / ExpansionHunter 各自 publishDir 到 06_repeat，主流程不需再接。
+// ──────────────────────────────────────────────────────────────
+workflow CALL_STR {
+    take:
+    bam_ch      // tuple(meta, bam, bai, ...)
+
+    main:
+    ch_fasta     = file(params.fasta)
+    ch_fasta_fai = file("${params.fasta}.fai")
+    def gangstr_regions = params.seq_type == "WES"
+        ? file(params.gangstr_regions_wes)
+        : file(params.gangstr_regions_wgs)
+
+    // 展開 24 條染色體：每個樣本 × 每條染色體 = 一個 GANGSTR_CHROM
+    def chroms = (1..22).collect { "chr${it}" } + ["chrX", "chrY"]
+    ch_bam_chrom = bam_ch.combine(Channel.from(chroms))
+    GANGSTR_CHROM(ch_bam_chrom, ch_fasta, ch_fasta_fai, gangstr_regions)
+
+    // 按樣本收集 24 個 VCF，依染色體順序排序後併入 GANGSTR_MERGE
+    ch_gangstr_vcfs = GANGSTR_CHROM.out.vcf
+        .map { meta, chrom, vcf -> [meta, chrom, vcf] }
+        .groupTuple(by: 0)
+        .map { meta, chroms_list, vcfs ->
+            def order = (1..22).collect { "chr${it}" } + ["chrX", "chrY"]
+            def sorted_vcfs = [chroms_list, vcfs].transpose()
+                .sort { a, b -> order.indexOf(a[0]) <=> order.indexOf(b[0]) }
+                .collect { it[1] }
+            [meta, sorted_vcfs]
+        }
+    GANGSTR_MERGE(ch_gangstr_vcfs)
+
+    // 選用：ExpansionHunter（--run_expansionhunter，預設關閉；非商用授權）
+    if (params.run_expansionhunter) {
+        EXPANSIONHUNTER(bam_ch, ch_fasta, ch_fasta_fai, file(params.str_catalog))
+    }
+
+    emit:
+    vcf = GANGSTR_MERGE.out.vcf
+}
