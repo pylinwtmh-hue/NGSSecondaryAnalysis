@@ -49,10 +49,20 @@ c.2168_2170delAAAinsTT。
 輸出與相依
 ----------
 * 輸入：單樣本 VCF(.gz)；輸出：未壓縮 VCF（交由 Nextflow bgzip+tabix）。
-* 合成出的紀錄 FORMAT 只保留 GT:PS（PS = 叢集第一顆的 PS，或 span 起點），並在
-  INFO 加 COMBINED=<n>；原始（未合）紀錄原封輸出。合成紀錄的深度/品質欄位（AD/DP…）
-  故意不帶（對 MNV 語義不明），下游若需要再議。
+* 合成出的 biallelic 紀錄會「繼承一顆代表變異（anchor＝叢集內參考足跡最寬的 biallelic
+  diploid 顆）」的整組 FORMAT：AD/DP/GQ/VAF/PL… 原封保留，當作該 compound 的讀取支持與
+  等位分數（符合 bug report §4：保留原始 locus 的 VAF/AD，不用 2 元 AD 重算成誤導的 1.0），
+  只覆寫 GT（重建出的 phased GT）與 PS，並在 INFO 標 COMBINED=<n>。QUAL/FILTER 沿用 anchor。
+* 下列情形「不重建、原封通過」（保留各來源紀錄原本的 AD/DP/VAF，交由下游 bcftools norm
+  拆分），以免捏造多等位深度：
+    (a) 叢集重建後有 2 個 ALT（1|2，如原生 multiallelic 1/2）；
+    (b) 叢集內找不到可當 anchor 的 biallelic diploid 紀錄；
+    (c) 叢集內含非 diploid（haploid，如 chrX/chrY/chrM）成分。
+* 原始（未合、孤立）紀錄一律原封輸出（保留所有 FORMAT）。
 * header 會補上 ##INFO=<ID=COMBINED> 與 ##FORMAT=<ID=PS>（若原本沒有）。
+
+⚠️ 早期版本合成紀錄只輸出 GT:PS，會把 AD/DP/VAF 丟成 '.'（三級 DRAGEN AD 消失 bug、
+   145k+ 筆受影響）。現改為「anchor 繼承 + 多等位/haploid 退回原封通過」，兩者都保住深度。
 """
 
 import argparse
@@ -268,10 +278,54 @@ def _open(path: str):
     return gzip.open(path, "rt") if magic == b"\x1f\x8b" else open(path, "rt")
 
 
+# ─────────────────────────────────────────────────────────────
+# 合成紀錄的 FORMAT 繼承（保住 AD/DP/VAF…；只覆寫 GT、PS）
+# ─────────────────────────────────────────────────────────────
+def _split_sample(line: str, sample_col: int):
+    """把一行 VCF 拆成 (fields, FORMAT keys, {key: value})（指定 sample 欄）。"""
+    f = line.rstrip("\n").split("\t")
+    keys = f[8].split(":") if len(f) > 8 else []
+    vals = f[9 + sample_col].split(":") if len(f) > 9 + sample_col else []
+    return f, keys, dict(zip(keys, vals))
+
+
+def _fmt_anchor(cluster: List[Var], sample_col: int) -> Optional[Var]:
+    """挑 FORMAT 捐贈者：叢集內「biallelic 且 diploid、且有 FORMAT」中足跡最寬
+    （tie → 最左）的一顆。找不到回 None（呼叫端會退回原封通過）。挑最寬是因為
+    compound 的主事件（如 SUZ12 的 GAAA>G 缺失）通常足跡最寬，其 AD/DP 最能代表
+    整個 compound 的讀取支持。"""
+    cands = [v for v in cluster
+             if len(v.alts) == 1 and len(v.alleles) == 2
+             and len(_split_sample(v.line, sample_col)[1]) > 0]
+    if not cands:
+        return None
+    cands.sort(key=lambda v: (-len(v.ref), v.pos))
+    return cands[0]
+
+
+def _render_merged(chrom: str, pos: int, ref: str, alt: str, gtstr: str,
+                   ps: str, n_combined: int, anchor: Var, sample_col: int) -> str:
+    """組出合成後的 biallelic 紀錄：沿用 anchor 的 QUAL/FILTER/FORMAT，只覆寫 GT、PS，
+    INFO 設 COMBINED=<n>。因 anchor 為 biallelic diploid，其 AD(Number=R)/PL(Number=G)
+    的元素數與合成後的 biallelic 一致，直接繼承即為正確長度。"""
+    f, keys, d = _split_sample(anchor.line, sample_col)
+    qual = f[5] if len(f) > 5 else "."
+    filt = f[6] if len(f) > 6 else "."
+    if "GT" not in keys:
+        keys = ["GT"] + keys
+    if "PS" not in keys:
+        keys = keys + ["PS"]
+    vals = [gtstr if k == "GT" else ps if k == "PS" else d.get(k, ".")
+            for k in keys]
+    return "\t".join([chrom, str(pos), ".", ref, alt, qual, filt,
+                      "COMBINED=%d" % n_combined, ":".join(keys), ":".join(vals)])
+
+
 def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             sample_col: int = 0) -> dict:
     """主流程；回傳統計。fetch 可注入（測試用）。"""
-    stats = {"clusters_merged": 0, "records_in": 0, "records_out": 0}
+    stats = {"clusters_merged": 0, "clusters_fallback": 0,
+             "records_in": 0, "records_out": 0}
     header, chrom_vars, order_chrom = [], {}, []
     fmt_extra = ['##INFO=<ID=COMBINED,Number=1,Type=Integer,'
                  'Description="Number of source records combined into this MNV '
@@ -285,21 +339,27 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             clusters = cluster_vars(vs, max_gap)
             recs = []
             for cl in clusters:
-                if len(cl) == 1:
-                    recs.append((cl[0].pos, cl[0].line))
+                # 孤立顆 / 含非 diploid 成分（haploid，chrX/Y/M）→ 原封通過，保留 FORMAT。
+                if len(cl) == 1 or any(len(v.alleles) != 2 for v in cl):
+                    for v in cl:
+                        recs.append((v.pos, v.line))
+                    if len(cl) > 1:
+                        stats["clusters_fallback"] += 1
                     continue
                 res = reconstruct(cl, fetch)
-                if res is None:
-                    for v in cl:               # 無法合 → 原行輸出
+                anchor = _fmt_anchor(cl, sample_col)
+                # 無法重建、重建成多 ALT（1|2）、或無 biallelic anchor → 原封通過（保留 AD）。
+                if res is None or len(res[2]) > 1 or anchor is None:
+                    for v in cl:
                         recs.append((v.pos, v.line))
+                    stats["clusters_fallback"] += 1
                     continue
                 pos, ref, alt_list, gt = res
                 gtstr = "|".join(str(g) for g in gt)
                 ps = next((v.ps for v in cl if v.ps), str(pos))
-                info = "COMBINED=%d" % len(cl)
-                recs.append((pos, "\t".join([
-                    chrom, str(pos), ".", ref, ",".join(alt_list),
-                    ".", "PASS", info, "GT:PS", "%s:%s" % (gtstr, ps)])))
+                recs.append((pos, _render_merged(
+                    chrom, pos, ref, alt_list[0], gtstr, ps, len(cl),
+                    anchor, sample_col)))
                 stats["clusters_merged"] += 1
             for _, line in sorted(recs, key=lambda x: x[0]):
                 w.write(line if line.endswith("\n") else line + "\n")
@@ -345,8 +405,10 @@ def main():
     a = ap.parse_args()
     fa = Faidx(a.fasta)
     st = process(a.inp, a.out, fa.fetch, a.max_gap, a.sample_index)
-    sys.stderr.write("[combine_phased] in=%d out=%d merged_clusters=%d\n"
-                     % (st["records_in"], st["records_out"], st["clusters_merged"]))
+    sys.stderr.write(
+        "[combine_phased] in=%d out=%d merged_clusters=%d passthrough_clusters=%d\n"
+        % (st["records_in"], st["records_out"], st["clusters_merged"],
+           st["clusters_fallback"]))
 
 
 if __name__ == "__main__":

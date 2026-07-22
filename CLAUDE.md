@@ -122,10 +122,28 @@ whatshap), gated by `params.combine_phased` (default true). Does NOT touch NCKUH
 `prepare_vcf`.
 
 **`combine_phased.py`** (stdlib-only; **duplicated byte-identical in the tertiary repo —
-keep in sync**): clusters variants by reference footprint (overlap, or *cis* gap ≤
-`combine_max_gap`, default 2), local-haplotype-reconstructs each cluster into an MNV;
-het-cis / hom only, non-overlapping trans left alone; ref-free trim first to drop caller
-"padding". Tests: `python3 scripts/test_combine_phased.py`.
+keep in sync**; md5 must match): clusters variants by reference footprint (overlap, or
+*cis* gap ≤ `combine_max_gap`, default 2), local-haplotype-reconstructs each cluster into
+an MNV; het-cis / hom only, non-overlapping trans left alone; ref-free trim first to drop
+caller "padding". Tests: `python3 scripts/test_combine_phased.py`.
+
+### ⚠️ Combined records must keep depth (`AD`/`DP`/`VAF`) — do NOT emit `GT:PS` only
+
+A combined MNV **inherits the full FORMAT of an anchor** (= the cluster's widest biallelic
+diploid record, e.g. the deletion in a del+ins compound), overwriting only `GT` (the
+reconstructed phased GT) and `PS`; `QUAL`/`FILTER` also come from the anchor. Because the
+anchor is biallelic diploid, its `AD`(Number=R)/`PL`(Number=G) element counts already match
+the biallelic MNV, so inheritance is length-correct. Per the DRAGEN bug report §4 this keeps
+the **original locus** `VAF`/`AD` rather than recomputing a misleading `1.0` from a 2-element
+`AD`. Three cases **do not reconstruct** — they pass the source records through untouched so
+their `AD` survives (downstream `bcftools norm -m -any` splits them): (a) reconstruction
+yields 2 ALTs (`1|2`, incl. native multiallelic `1/2`); (b) no biallelic anchor in the
+cluster; (c) any non-diploid (haploid `chrX/chrY/chrM`) member. The stderr line reports
+`merged_clusters` and `passthrough_clusters`.
+
+> The earlier version emitted only `GT:PS` on combined records, dropping `AD`/`DP`/`VAF` to
+> `.` — this silently killed depth on 145k+ phased records (DRAGEN tertiary "AD 消失" bug,
+> VAL-58 `chr17:80260571` / confirmed on VAL-10). Fixed by anchor inheritance + passthrough.
 
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 
@@ -145,9 +163,11 @@ multiallelic sites (benign — tertiary's `norm -m -any` becomes a no-op). Combi
 sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 
 **Validation status (2026-07):** secondary confirmed (VAL55 SUZ12 → `GAAA>GTT`; NA12878
-`chr1:111241360` AD well-formed; preflight passes). Pending: tertiary NCKUH end-to-end
-`-resume` (`ADD_CALLERS_TAG`); DRAGEN combine needs a DRAGEN sample with a split compound;
-broader multi-sample validation before clinical use.
+`chr1:111241360` AD well-formed; preflight passes). Combined-record depth-preservation fix
+confirmed by unit+integration tests (`test_combine_phased.py`, 13 cases) and a CLI smoke run
+(SUZ12 compound keeps `AD=30,12`; reporter's `1/2 AD=0,28,20` passes through intact). Pending:
+tertiary NCKUH end-to-end `-resume` (`ADD_CALLERS_TAG`); a real DRAGEN sample re-run to confirm
+`AD_DRAGEN` now populates; broader multi-sample validation before clinical use.
 
 ---
 

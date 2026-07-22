@@ -1553,7 +1553,7 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       重疊或 cis gap≤`combine_max_gap`(預設 2，對齊 DRAGEN) 叢集，做局部單體重建成 MNV；只合 het cis / hom，
       trans 不重疊不合。合前先 ref-free trim 去 padding（否則 DV 的 `GAAA>GAA`+`A>T` 會假性重疊、漏掉 SNV；
       trim 後正確重建 `GAAA>GAT`）。實測 SUZ12：HC→`GAAA>GTT`、DV→`GAAA>GAT`，兩 caller 重建後常一致而塌成
-      單筆（COMBINED tag 記合併筆數）。單元測試：`python3 scripts/test_combine_phased.py`（9 例）。
+      單筆（COMBINED tag 記合併筆數）。單元測試：`python3 scripts/test_combine_phased.py`（13 例）。
     - **注意**：combine 會**降低**變異數（compound 多筆→一筆），故 ensemble 變異數比未 phase 時略少（設計如此，
       非漏變異）。驗證看特定位點（SUZ12）+ combine 的 stderr `in/out/merged_clusters`，不要用「總數相等」。
 41. **whatshap 把 DV 的 `FORMAT/AD` header 重新宣告成 `Number=.` → 與 HC 的 `Number=R` 不一致 → norm/merge 把 AD 弄壞**：
@@ -1576,3 +1576,18 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     4. 發布前 **preflight** `bcftools norm -m -any … -Ou -o /dev/null`，壞掉就 **fail loud**、不把壞檔丟三級。
     **不要**用 `norm --force`（那是丟棄壞 tag，會靜默掉 AD/VAF）。若之後 `PL`(Number=G) 等其他 tag 也報同類錯，
     比照把該 tag 的 header 補成正確 Number。
+42. **`combine_phased.py` 合成紀錄只輸出 `GT:PS` → `AD`/`DP`/`VAF` 全丟成 `.`（三級 DRAGEN「AD 消失」bug）**：
+    早期版本把重建出的 MNV 只寫 `GT:PS`，深度/等位分數欄位（`AD`/`DP`/`VAF`/`GQ`/`PL`）一律不帶。三級
+    `add_dragen_tag.py` 用 `variant.format("AD")` 依名字讀 → 讀到空 → `AD_DRAGEN=.`；再經 `bcftools norm -m -any`
+    拆開後兩筆 biallelic 都 `AD=. DP=. VAF=.`（同事回報 VAL-58 `chr17:80260571`；實測 VAL-10 共 **145,428** 筆
+    phased 紀錄 AD 不見）。**根因不是 `bcftools norm`、也不是 `add_dragen_tag`，是 combine 設計把深度丟了**。
+    解法（`scripts/combine_phased.py`，二級三級同一支）：
+    - 合成的 biallelic MNV **繼承 anchor（叢集內足跡最寬的 biallelic diploid 顆）整組 FORMAT**，只覆寫 `GT`（重建的
+      phased GT）與 `PS`，`QUAL`/`FILTER` 也沿用 anchor。anchor 是 biallelic diploid，其 `AD`(R)/`PL`(G) 元素數
+      與合成後 biallelic 一致 → 長度正確、不會再壞。符合 bug report §4：保留**原始 locus** 的 VAF/AD，不用 2 元 AD
+      重算成誤導的 `1.0`。
+    - 三種情況**不重建、原封通過**（來源紀錄的 AD 原樣保住，交下游 `norm -m -any` 拆）：(a) 重建成 2 個 ALT
+      （`1|2`，含原生 multiallelic `1/2`，正是 reporter 的 `CCGGCGG→CCGG,C AD=0,28,20`）；(b) 找不到 biallelic
+      anchor；(c) 含非 diploid（haploid `chrX/chrY/chrM`）成分。
+    - stderr 由 `merged_clusters` 加報 `passthrough_clusters`。回歸測試：`test_combine_phased.py`（新增 4 例：
+      合成保留 AD/DP/AF、`1|2` 退回原封、haploid 退回原封、孤立逐字通過）。
