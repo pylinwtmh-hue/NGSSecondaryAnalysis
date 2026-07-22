@@ -105,3 +105,26 @@ process BCFTOOLS_ROH {
         ${vcf}
     """
 }
+
+
+// ──────────────────────────────────────────────────────────────
+// CALL_ROH sub-workflow（Lane 6）：獨立的 ROH 車道，兩支互不相依、皆為選用（預設關閉，
+//   ROH 不納入評鑑）。輸入用 HaplotypeCaller raw VCF（保留 GT/AD；VQSR 後或 DeepVariant
+//   VCF 不可用）。flag 收在 sub-workflow 內部，主流程無條件呼叫即可（與 CALL_STR gate
+//   ExpansionHunter、CALL_CNV_SV gate Manta/gCNV 的作法一致）。
+//     --run_roh     → bcftools roh（MIT/GPL，可商用）
+//     --run_automap → AutoMap（無授權，非商用／研究）
+//   兩者各自 publishDir 到 08_roh，為終端輸出，故無 emit。
+// ──────────────────────────────────────────────────────────────
+workflow CALL_ROH {
+    take:
+    hc_vcf_ch      // tuple(meta, vcf, tbi)：HaplotypeCaller raw VCF
+
+    main:
+    if (params.run_roh) {
+        BCFTOOLS_ROH(hc_vcf_ch)
+    }
+    if (params.run_automap) {
+        AUTOMAP(hc_vcf_ch)
+    }
+}

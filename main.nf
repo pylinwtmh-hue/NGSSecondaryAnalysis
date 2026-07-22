@@ -58,7 +58,7 @@ include { CALL_CNV_SV }                     from './modules/cnv_sv'
 include { CALL_STR }                        from './modules/repeat'
 include { CALL_MITO }                       from './modules/call_mito'
 include { MULTIQC }                         from './modules/postprocessing'
-include { AUTOMAP; BCFTOOLS_ROH }           from './modules/roh'
+include { CALL_ROH }                        from './modules/roh'
 
 if (!params.input_csv) {
     error "錯誤：請提供 --input_csv 參數"
@@ -156,14 +156,9 @@ workflow {
     // Lane 5: Mitochondria variant calling
     CALL_MITO(ch_bam)
 
-    // ROH（選用，皆預設關閉；ROH 不納入評鑑）：用 HaplotypeCaller raw VCF（保留 GT/AD）。
-    //   --run_roh → bcftools roh（MIT/GPL，可商用）；--run_automap → AutoMap（非商用/研究）
-    if (params.run_roh) {
-        BCFTOOLS_ROH(CALL_SNV.out.hc_vcf_raw)
-    }
-    if (params.run_automap) {
-        AUTOMAP(CALL_SNV.out.hc_vcf_raw)
-    }
+    // Lane 6: ROH（sub-workflow：bcftools roh + AutoMap，皆選用、預設關閉；ROH 不納入評鑑）
+    //   用 HaplotypeCaller raw VCF（保留 GT/AD）；flag 收在 CALL_ROH 內部。
+    CALL_ROH(CALL_SNV.out.hc_vcf_raw)
 
     // =========================================================
     // (F) MultiQC 匯總
