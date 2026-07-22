@@ -19,27 +19,28 @@ for validating and interpreting all results.
 scripts/ploidy_check.py
 =======================
 
-從 mosdepth 的 `*.summary.txt` 推「性別 + 每條染色體的相對 ploidy」，做兩件事：
-  1. sex 防呆：把「資料推得的性別」和 samplesheet 宣告的 sex 比對，不符 → WARN。
-  2. aneuploidy 提示：每條體染色體的 normalized coverage（相對體染色體中位數），
-     偏離 1.0 太多（如三體 ≈1.5、單體 ≈0.5）→ WARN「考慮手動 -ploidy N 重跑」。
+從 mosdepth 的 `*.summary.txt` 推「性別 + 每條染色體 ploidy」，做兩件事：
+  1. sex 防呆：把資料推得的性別與 samplesheet 宣告的 sex 比對，不符 → WARN。
+  2. aneuploidy 提示：某染色體 normalized coverage（NDC）偏離 1.0 太多 → WARN「考慮手動
+     -ploidy N 重跑」。
 
-**warn-only**：只印警示 + 寫進 QC 檔，永不改 ploidy、永不讓 pipeline 失敗（exit 0）。
-最保守：把判斷權留給人。
+**warn-only**：只印警示 + 寫 QC 檔，永不改 ploidy、永不讓 pipeline 失敗（exit 0）。
 
-輸出（對齊 DRAGEN 的 *.ploidy.vcf 風格，交由 Nextflow bgzip 成 .gz）：
-  - <sample>.ploidy.vcf ：每條 contig 一列，FORMAT=DC:NDC（DC=mean depth、NDC=normalized），
-    header 帶 ##estimatedSexKaryotype / ##declaredSexKaryotype；疑似非整倍體的 contig
-    FILTER=SUSPECT。
-  - <sample>.ploidy_qc.txt：人可讀摘要 + WARNINGS 區塊。
+輸出（**與三級 DRAGEN parse_dragen_ploidy.py 統一**：同 VCF header key、同 NDC 語意）：
+  - <sample>.ploidy.vcf ：每 contig 一列 FORMAT=DC:NDC:RATIO；header 帶
+    ##estimatedSexKaryotype（資料推得）/ ##referenceSexKaryotype（samplesheet 宣告）；
+    疑似非整倍體的 contig FILTER=SUSPECT。交由 Nextflow 壓成 .gz。
+  - <sample>.ploidy_qc.txt：人可讀摘要 + WARNINGS。
 
+⚠️ NDC 語意（對齊 DRAGEN）：NDC = 觀測 ÷「**估計核型下的期望**」，已對性別正規化：
+    - autosome 期望 = 1.0；chrX/chrY 期望依估計核型（男 chrX 期望 0.5）。
+    - 正常樣本每 contig（含 chrX/chrY）NDC ≈ 1.0；偏離 1.0 = 非預期（如三體 ≈1.5）。
+  另存 RATIO = 相對體染色體中位數的**原始**覆蓋比（男 chrX ≈ 0.5），保留性別/劑量證據。
+  （aneuploidy 判定用 NDC 偏離 1.0；性染色體非整倍體另由核型判定 XXY?/X0? 反映。）
+
+mosdepth summary 欄位：chrom length bases mean min max。每 contig 優先取 *_region
+（on-target）mean，否則整條 mean（WES off-target 稀釋，故優先 region；WGS 兩者接近）。
 相依：只用 Python 標準庫。
-
-mosdepth summary 欄位：chrom  length  bases  mean  min  max
-  - WGS：用整條染色體 mean；--by autosome_bed 產生的 *_region 列（autosome 專屬）優先，
-    X/Y 無 region 列 → 回退整條 mean（WGS 全基因體覆蓋，兩者接近）。
-  - WES：整條 mean 會被 off-target 稀釋，故優先用 *_region（on-target）mean；X/Y 若無
-    target 則不可靠 → 於 QC 檔註記（WES 另有 gCNV 的 ploidy 可交叉驗證）。
 """
 
 import argparse
@@ -47,15 +48,16 @@ import statistics
 import sys
 
 AUTOSOMES = ["chr%d" % i for i in range(1, 23)]
+MITO = {"chrM", "chrMT", "MT", "M"}
 # 分類門檻（保守、warn-only）
-X_MALE_MAX = 0.75     # X normalized < 此 → 傾向單套（男）
-Y_PRESENT_MIN = 0.15  # Y normalized ≥ 此 → 有 Y
-ANEUPLOIDY_LO = 0.75  # 體染色體 normalized < 此 或
-ANEUPLOIDY_HI = 1.25  #                    > 此 → 疑似非整倍體
+X_MALE_MAX = 0.75     # X 原始比 < 此 → 傾向單套（男）
+Y_PRESENT_MIN = 0.15  # Y 原始比 ≥ 此 → 有 Y
+ANEUPLOIDY_LO = 0.75  # NDC < 此 或
+ANEUPLOIDY_HI = 1.25  #     > 此 → 疑似非整倍體
 
 
 def parse_mosdepth_summary(path):
-    """回傳 {chrom: mean}。每條 contig 優先取 *_region（on-target），否則整條 mean。"""
+    """回傳 ({chrom: mean}, {chrom: length})。每 contig 優先取 *_region，否則整條 mean。"""
     whole, region, length = {}, {}, {}
     with open(path) as f:
         header = f.readline().rstrip("\n").split("\t")
@@ -75,8 +77,7 @@ def parse_mosdepth_summary(path):
             except ValueError:
                 continue
             if name.endswith("_region"):
-                base = name[:-len("_region")]
-                region[base] = mean
+                region[name[:-len("_region")]] = mean
             else:
                 whole[name] = mean
                 try:
@@ -100,7 +101,7 @@ def normalize_declared_sex(raw):
 
 
 def infer_karyotype(means, baseline):
-    """回傳 (karyotype_str, x_ratio, y_ratio)。"""
+    """從**原始**覆蓋比推核型。回傳 (karyotype, x_ratio, y_ratio)。"""
     x = means.get("chrX")
     y = means.get("chrY")
     x_ratio = (x / baseline) if (x is not None and baseline) else None
@@ -122,28 +123,49 @@ def infer_karyotype(means, baseline):
     return kary, x_ratio, y_ratio
 
 
-def aneuploidy_flags(means, baseline):
-    """回傳 [(chrom, ndc), ...]，體染色體 normalized coverage 偏離 1.0 太多者。"""
-    out = []
-    if not baseline:
-        return out
-    for c in AUTOSOMES:
-        m = means.get(c)
-        if m is None:
-            continue
-        ndc = m / baseline
-        if ndc < ANEUPLOIDY_LO or ndc > ANEUPLOIDY_HI:
-            out.append((c, ndc))
-    return out
+def _xy_counts(kary):
+    """從核型字串數 X / Y 拷貝數；unknown/ambiguous → (None, None)（不正規化性染色體）。"""
+    k = kary.replace("?", "").upper()
+    if k in ("UNKNOWN", "AMBIGUOUS", ""):
+        return None, None
+    return k.count("X"), k.count("Y")
+
+
+def expected_ratio(chrom, kary):
+    """該 contig 在估計核型下的期望原始比（相對體染色體 diploid=1.0）。
+    autosome=1.0；chrX=nX*0.5；chrY=nY*0.5。回 None 代表不正規化（未知核型）。"""
+    if chrom in AUTOSOMES:
+        return 1.0
+    nx, ny = _xy_counts(kary)
+    if nx is None:
+        return 1.0                      # 未知核型 → 不對性染色體正規化
+    if chrom == "chrX":
+        return nx * 0.5
+    if chrom == "chrY":
+        return ny * 0.5
+    return 1.0
 
 
 def analyze(means, length, declared_sex, seq_type="WGS"):
-    """回傳 dict 結果（含 warnings）。純函式、好測試。"""
+    """回傳 dict 結果（含 per-contig ratio/ndc 與 warnings）。純函式、好測試。"""
     auto_means = [means[c] for c in AUTOSOMES if means.get(c) is not None]
     baseline = statistics.median(auto_means) if auto_means else 0.0
     est_kary, x_ratio, y_ratio = infer_karyotype(means, baseline)
     declared_kary = normalize_declared_sex(declared_sex)
-    flags = aneuploidy_flags(means, baseline)
+
+    ratio, ndc = {}, {}
+    for c, m in means.items():
+        r = (m / baseline) if baseline else 0.0
+        ratio[c] = r
+        if c in MITO:
+            ndc[c] = None                # chrM 多拷貝，NDC 無意義
+            continue
+        exp = expected_ratio(c, est_kary)
+        ndc[c] = (r / exp) if (exp and exp > 0) else None   # 期望 0（如女 chrY）→ NA
+
+    # aneuploidy：NDC 偏離 1.0（非 mito、有 NDC 值）。性染色體正常會 ≈1.0（已正規化）。
+    flags = [(c, ndc[c]) for c in (AUTOSOMES + ["chrX", "chrY"])
+             if ndc.get(c) is not None and (ndc[c] < ANEUPLOIDY_LO or ndc[c] > ANEUPLOIDY_HI)]
 
     warnings = []
     if declared_kary != "unknown" and est_kary not in ("unknown", "ambiguous") \
@@ -154,9 +176,9 @@ def analyze(means, length, declared_sex, seq_type="WGS"):
     if est_kary in ("XXY?", "X0?", "ambiguous"):
         warnings.append("性染色體核型異常/不明：推得 %s（X_ratio=%s, Y_ratio=%s）"
                         % (est_kary, _fmt(x_ratio), _fmt(y_ratio)))
-    for c, ndc in flags:
-        warnings.append("%s normalized coverage=%.2f → 疑似非整倍體，"
-                        "本染色體 SNV 基因型可能不準，考慮手動 -ploidy N 重跑" % (c, ndc))
+    for c, v in flags:
+        warnings.append("%s NDC=%.2f → 疑似非整倍體，本染色體 SNV 基因型可能不準，"
+                        "考慮手動 -ploidy N 重跑" % (c, v))
     if seq_type == "WES":
         warnings.append("注意：WES 以 target 覆蓋估計，性別/ploidy 判斷較粗；"
                         "aneuploidy 建議以 gCNV 交叉驗證")
@@ -167,6 +189,8 @@ def analyze(means, length, declared_sex, seq_type="WGS"):
         "declared_karyotype": declared_kary,
         "x_ratio": x_ratio,
         "y_ratio": y_ratio,
+        "ratio": ratio,
+        "ndc": ndc,
         "aneuploidy": flags,
         "warnings": warnings,
         "means": means,
@@ -181,35 +205,41 @@ def _fmt(x):
 # ─────────────────────────────────────────────────────────────
 # 輸出
 # ─────────────────────────────────────────────────────────────
+def _ordered_chroms(keys):
+    order = AUTOSOMES + ["chrX", "chrY", "chrM"]
+    return [c for c in order if c in keys] + sorted(c for c in keys if c not in order)
+
+
 def write_vcf(path, sample, res, seq_type):
-    baseline = res["baseline"]
     means, length = res["means"], res["length"]
     flagged = {c for c, _ in res["aneuploidy"]}
-    # 依標準染色體排序，其餘照名稱
-    order = AUTOSOMES + ["chrX", "chrY", "chrM"]
-    chroms = [c for c in order if c in means] + \
-             sorted(c for c in means if c not in order)
     with open(path, "w") as w:
         w.write("##fileformat=VCFv4.2\n")
         w.write("##source=NCKUH_PLOIDY_MOSDEPTH\n")
         w.write("##seqType=%s\n" % seq_type)
         w.write("##estimatedSexKaryotype=%s\n" % res["estimated_karyotype"])
-        w.write("##declaredSexKaryotype=%s\n" % res["declared_karyotype"])
-        w.write('##FILTER=<ID=SUSPECT,Description="Normalized coverage suggests '
-                'possible aneuploidy for this contig">\n')
+        w.write("##referenceSexKaryotype=%s\n" % res["declared_karyotype"])
+        w.write('##FILTER=<ID=SUSPECT,Description="Normalized coverage suggests possible '
+                'aneuploidy for this contig">\n')
         w.write('##INFO=<ID=END,Number=1,Type=Integer,Description="Contig end">\n')
         w.write('##FORMAT=<ID=DC,Number=1,Type=Float,Description="Mean depth of coverage '
                 '(mosdepth)">\n')
-        w.write('##FORMAT=<ID=NDC,Number=1,Type=Float,Description="Normalized depth of '
-                'coverage relative to autosomal median (~1.0 diploid, ~0.5 haploid)">\n')
+        w.write('##FORMAT=<ID=NDC,Number=1,Type=Float,Description="Normalized depth of coverage '
+                'relative to expected ploidy for the estimated karyotype (~1.0 = as-expected). '
+                'NA when expected copy number is 0">\n')
+        w.write('##FORMAT=<ID=RATIO,Number=1,Type=Float,Description="Raw depth ratio relative to '
+                'autosomal median (~1.0 diploid, ~0.5 haploid); sex/dosage evidence">\n')
         w.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n" % sample)
-        for c in chroms:
-            m = means[c]
-            ndc = (m / baseline) if baseline else 0.0
+        for c in _ordered_chroms(means.keys()):
+            dc = means[c]
+            r = res["ratio"].get(c)
+            v = res["ndc"].get(c)
             filt = "SUSPECT" if c in flagged else "PASS"
             end = length.get(c, 0)
-            w.write("%s\t1\t.\tN\t.\t.\t%s\tEND=%d\tDC:NDC\t%.4f:%.4f\n"
-                    % (c, filt, end, m, ndc))
+            ndc_s = ("%.4f" % v) if v is not None else "."
+            ratio_s = ("%.4f" % r) if r is not None else "."
+            w.write("%s\t1\t.\tN\t.\t.\t%s\tEND=%d\tDC:NDC:RATIO\t%.4f:%s:%s\n"
+                    % (c, filt, end, dc, ndc_s, ratio_s))
 
 
 def write_qc(path, sample, res, seq_type):
@@ -221,15 +251,18 @@ def write_qc(path, sample, res, seq_type):
                   or res["estimated_karyotype"] in ("unknown", "ambiguous")
                   or res["declared_karyotype"] == res["estimated_karyotype"])
         w.write("sex_check              : %s\n" % ("OK" if sex_ok else "MISMATCH"))
+        w.write("source                 : NCKUH mosdepth (NDC normalized to expected karyotype; "
+                "~1.0 = as-expected. RATIO = raw ratio vs autosomes)\n")
         w.write("autosomal_baseline_mean: %.4f\n" % res["baseline"])
         w.write("chrX_ratio             : %s\n" % _fmt(res["x_ratio"]))
         w.write("chrY_ratio             : %s\n" % _fmt(res["y_ratio"]))
-        w.write("\n--- per-chromosome normalized coverage (NDC) ---\n")
-        baseline = res["baseline"]
-        order = AUTOSOMES + ["chrX", "chrY", "chrM"]
-        for c in [x for x in order if x in res["means"]]:
-            ndc = (res["means"][c] / baseline) if baseline else 0.0
-            w.write("%-6s %.3f\n" % (c, ndc))
+        w.write("\n--- per-chromosome NDC / RATIO ---\n")
+        for c in _ordered_chroms(res["means"].keys()):
+            v = res["ndc"].get(c)
+            r = res["ratio"].get(c)
+            w.write("%-6s NDC=%-6s RATIO=%s\n"
+                    % (c, ("%.3f" % v) if v is not None else "NA",
+                       ("%.3f" % r) if r is not None else "NA"))
         w.write("\n--- WARNINGS ---\n")
         if res["warnings"]:
             for msg in res["warnings"]:
@@ -254,7 +287,6 @@ def main():
     write_vcf(a.out_vcf, a.sample, res, a.seq_type)
     write_qc(a.out_qc, a.sample, res, a.seq_type)
 
-    # warn-only：印到 stderr（→ nextflow log），永不 fail
     for msg in res["warnings"]:
         sys.stderr.write("[ploidy_check] WARN: %s\n" % msg)
     sys.stderr.write("[ploidy_check] %s declared=%s estimated=%s baseline=%.2f\n"
