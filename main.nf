@@ -52,7 +52,7 @@ nextflow.enable.dsl = 2
 
 include { FASTP }                           from './modules/preprocessing'
 include { PARABRICKS_FQ2BAM }               from './modules/alignment'
-include { SAMTOOLS_STATS; MOSDEPTH }        from './modules/alignment_qc'
+include { SAMTOOLS_STATS; MOSDEPTH; PLOIDY_CHECK } from './modules/alignment_qc'
 include { PARABRICKS_DEEPVARIANT;
           PARABRICKS_HAPLOTYPECALLER;
           GATK_HAPLOTYPECALLER;
@@ -178,6 +178,12 @@ workflow {
     MOSDEPTH(ch_bam, ch_mosdepth_targets, ch_autosome_bed)
     // (meta, summary.txt)：mito NuMT filter 與 MultiQC 共用同一輸出
     ch_mosdepth_summary = MOSDEPTH.out.summary
+
+    // sex 防呆 + 每條染色體 ploidy 提示（warn-only；不改 ploidy、不中斷）。
+    //   從 mosdepth summary 推性別/ploidy，與 samplesheet 宣告的 sex 比對，
+    //   不符或疑似非整倍體 → WARN + 出 QC 檔（03_alignment_qc/*.ploidy.vcf.gz、*.ploidy_qc.txt）。
+    ch_ploidy_py = file("${projectDir}/scripts/ploidy_check.py")
+    PLOIDY_CHECK(MOSDEPTH.out.summary, ch_ploidy_py)
 
     // =========================================================
     // (E) Step 4: Parallel Variant Calling

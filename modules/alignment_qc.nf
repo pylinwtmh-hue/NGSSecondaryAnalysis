@@ -111,3 +111,42 @@ process MOSDEPTH {
         ${bam}
     """
 }
+
+
+// ──────────────────────────────────────────────────────────────
+// PLOIDY_CHECK：從 mosdepth summary 推 sex/ploidy（sex 防呆 + aneuploidy 提示）。
+//   warn-only：只印警示 + 出 QC 檔，不改 ploidy、不讓 pipeline 失敗。
+//   輸出（對齊 DRAGEN *.ploidy.vcf.gz 風格）：
+//     - <id>.ploidy.vcf.gz ：每條 contig 一列 FORMAT=DC:NDC，header 帶 estimated/declared 核型
+//     - <id>.ploidy_qc.txt ：人可讀摘要 + WARNINGS
+//   ploidy_check.py 以 staged path input 傳入（content-hash → 改 script 後 -resume 正確重跑）。
+// ──────────────────────────────────────────────────────────────
+process PLOIDY_CHECK {
+
+    tag "${meta.id}"
+
+    publishDir "${params.out_dir}/${meta.id}/03_alignment_qc", mode: 'copy'
+
+    input:
+    tuple val(meta), path(summary)
+    path ploidy_py
+
+    output:
+    tuple val(meta),
+          path("${meta.id}.ploidy.vcf.gz"),
+          path("${meta.id}.ploidy_qc.txt"), emit: ploidy
+
+    script:
+    """
+    python3 ${ploidy_py} \
+        --summary ${summary} \
+        --sample ${meta.id} \
+        --declared-sex ${meta.sex} \
+        --seq-type ${params.seq_type} \
+        --out-vcf ${meta.id}.ploidy.vcf \
+        --out-qc ${meta.id}.ploidy_qc.txt
+    # 對齊 DRAGEN 的 *.ploidy.vcf.gz（用 bcftools 壓縮；tertiary_python 容器含 bcftools）
+    bcftools view ${meta.id}.ploidy.vcf -Oz -o ${meta.id}.ploidy.vcf.gz
+    rm -f ${meta.id}.ploidy.vcf
+    """
+}

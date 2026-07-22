@@ -1633,8 +1633,12 @@ chrX/chrY 會出現假 het，尤其 DeepVariant）。方向：
 - 建立 region-aware 的信心度與合併策略（confidence by region），而非單純多數決。
 
 ### 近期落地步驟（近 → 遠）
-- [ ] **sex 防呆**：mosdepth X/Y 覆蓋 vs samplesheet 宣告 sex，不一致 → warn / fail-loud（最保守：不自動改 ploidy）。
-- [ ] **per-chromosome ploidy 提示**：順便輸出各染色體覆蓋 z-score + het BAF，疑似非整倍體就提示手動 `-ploidy N`。
-- [ ] **strand-bias 警示欄**（三級報告面；DV 路缺 FS/SOR 需另計，見 pitfall）。
-- [ ] 三級接 DRAGEN `*.ploidy.vcf.gz` → 性別自動化 + 性染色體 aneuploidy 標記。
+- [x] **sex 防呆 + per-chromosome ploidy 提示**：`PLOIDY_CHECK`（`modules/alignment_qc.nf` +
+      `scripts/ploidy_check.py`）從 mosdepth summary 推 sex/NDC，與 samplesheet sex 比對，不符或疑似
+      非整倍體 → **warn-only** + 出 `03_alignment_qc/*.ploidy.vcf.gz`（DRAGEN 風格）＋ `*.ploidy_qc.txt`。
+      （het BAF 交叉驗證仍待做，見第 3 點；WES 覆蓋較吵，建議搭 gCNV。）
+- [x] **strand-bias 警示欄**：三級 `parse_vep_csq.py` 的 `STRAND_BIAS` 欄（FS/SOR；DRAGEN + NCKUH-HC 有，
+      DeepVariant-only → `.` 人工複核）。
+- [ ] 三級接 DRAGEN `*.ploidy.vcf.gz`（現成 `##estimatedSexKaryotype` + 每 contig `NDC`）→ 性別自動化
+      + 性染色體/體染色體 aneuploidy 標記；並把二級 `PLOIDY_CHECK` 的輸出一起接進報告做交叉驗證。
 - [ ] （長期）第 2、4 點：sex-aware / ploidy-aware calling 與多 caller region-aware 組合。
