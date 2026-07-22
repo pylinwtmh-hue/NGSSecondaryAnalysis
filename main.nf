@@ -69,18 +69,7 @@ include { CNVKIT_BATCH;
 include { GANGSTR_CHROM;
           GANGSTR_MERGE;
           EXPANSIONHUNTER }                from './modules/repeat'
-include { MITO_EXTRACT_READS;
-          MITO_BAM2FASTQ_NORMAL;
-          MITO_BAM2FASTQ_SHIFTED;
-          MITO_BWA_NORMAL;
-          MITO_BWA_SHIFTED;
-          MITO_SORT_MARKDUP as MITO_SORT_INDEX_NORMAL;
-          MITO_SORT_MARKDUP as MITO_SORT_INDEX_SHIFTED;
-          MITO_MUTECT2_NORMAL;
-          MITO_MUTECT2_SHIFTED;
-          MITO_LIFTOVER;
-          MITO_MERGE;
-          MITO_FILTER }                     from './modules/mitochondria'
+include { CALL_MITO }                       from './subworkflows/call_mito'
 include { BGZIP_VCF as BGZIP_VCF_DV;
           BGZIP_VCF as BGZIP_VCF_HC;
           BCFTOOLS_ENSEMBLE;
@@ -316,80 +305,9 @@ workflow {
     }
 
     // =========================================================
-    // Lane 5: Mitochondria variant calling
+    // Lane 5: Mitochondria variant calling（sub-workflow）
     // =========================================================
-    ch_chrM_only_fasta    = file(params.chrM_only_fasta)
-    ch_chrM_only_fai      = file("${params.chrM_only_fasta}.fai")
-    ch_chrM_only_dict     = file(params.chrM_only_fasta.replace('.fasta', '.dict'))
-    ch_chrM_shifted_fasta = file(params.chrM_shifted_fasta)
-    ch_chrM_shifted_fai   = file("${params.chrM_shifted_fasta}.fai")
-    ch_chrM_shifted_dict  = file(params.chrM_shifted_fasta.replace('.fasta', '.dict'))
-    ch_shift_back         = file(params.chrM_shift_back)
-    ch_chrM_blacklist     = file(params.chrM_blacklist)
-
-    MITO_EXTRACT_READS(ch_bam)
-
-    MITO_BAM2FASTQ_NORMAL(MITO_EXTRACT_READS.out.reads)
-    MITO_BWA_NORMAL(
-        MITO_BAM2FASTQ_NORMAL.out.reads,
-        ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
-        file("${params.chrM_only_fasta}.amb"),
-        file("${params.chrM_only_fasta}.ann"),
-        file("${params.chrM_only_fasta}.bwt"),
-        file("${params.chrM_only_fasta}.pac"),
-        file("${params.chrM_only_fasta}.sa")
-    )
-    MITO_SORT_INDEX_NORMAL(MITO_BWA_NORMAL.out.bam)
-
-    MITO_BAM2FASTQ_SHIFTED(MITO_EXTRACT_READS.out.reads)
-    MITO_BWA_SHIFTED(
-        MITO_BAM2FASTQ_SHIFTED.out.reads,
-        ch_chrM_shifted_fasta, ch_chrM_shifted_fai, ch_chrM_shifted_dict,
-        file("${params.chrM_shifted_fasta}.amb"),
-        file("${params.chrM_shifted_fasta}.ann"),
-        file("${params.chrM_shifted_fasta}.bwt"),
-        file("${params.chrM_shifted_fasta}.pac"),
-        file("${params.chrM_shifted_fasta}.sa")
-    )
-    MITO_SORT_INDEX_SHIFTED(MITO_BWA_SHIFTED.out.bam)
-
-    MITO_MUTECT2_NORMAL(
-        MITO_SORT_INDEX_NORMAL.out.bam,
-        ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
-        ch_chrM_blacklist
-    )
-    MITO_MUTECT2_SHIFTED(
-        MITO_SORT_INDEX_SHIFTED.out.bam,
-        ch_chrM_shifted_fasta, ch_chrM_shifted_fai, ch_chrM_shifted_dict,
-        ch_chrM_blacklist
-    )
-
-    MITO_LIFTOVER(
-        MITO_MUTECT2_SHIFTED.out.vcf,
-        ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
-        ch_shift_back
-    )
-    // join() 確保同一個樣本的 normal VCF 和 lifted VCF 配對
-    // 沒有 join 的話，Nextflow 按 queue 順序配對，多樣本非同步完成時會跨樣本錯配
-    ch_mito_merge_input = MITO_MUTECT2_NORMAL.out.vcf
-        .join(MITO_LIFTOVER.out.vcf, by: 0)
-        .map { meta, normal_vcf, normal_tbi, normal_stats,
-                      lifted_vcf, lifted_tbi, lifted_stats ->
-            [meta, normal_vcf, normal_tbi, normal_stats,
-                   lifted_vcf, lifted_tbi, lifted_stats]
-        }
-    MITO_MERGE(
-        ch_mito_merge_input,
-        ch_chrM_only_dict
-        )
-    // MITO_FILTER：GATK 4.6 的 FilterMutectCalls 已無 --autosomal-coverage，
-    // 不再需要 mosdepth summary（NuMT 過濾靠 --mitochondria-mode + blacklist mask）。
-    MITO_FILTER(
-        MITO_MERGE.out.vcf,
-        ch_chrM_only_fasta, ch_chrM_only_fai, ch_chrM_only_dict,
-        ch_chrM_blacklist,
-        file("${params.chrM_blacklist}.idx")
-    )
+    CALL_MITO(ch_bam)
 
     // =========================================================
     // (F) Step 5: Post-processing
