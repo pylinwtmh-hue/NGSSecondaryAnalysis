@@ -335,7 +335,8 @@ workflow {
     }
 
     // 性別感知倍體定義（單一真相來源；+fixploidy 用，未來 ploidy-aware calling 也由此推導）
-    ch_sex_ploidy = file(params.sex_ploidy_file, checkIfExists: true)
+    //   不用 checkIfExists：讓 -preview 不需先放好參考檔；缺檔時仍會在實跑 staging 階段 fail-loud。
+    ch_sex_ploidy = file(params.sex_ploidy_file)
     BCFTOOLS_ENSEMBLE(ch_ensemble_input, ch_sex_ploidy)
 
     // ROH（選用，皆預設關閉；ROH 不納入評鑑）：用 HaplotypeCaller VCF（保留 GT/AD）。
