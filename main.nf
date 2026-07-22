@@ -416,7 +416,9 @@ workflow {
         ch_ensemble_input = ch_dv_vcf.join(ch_filtered_hc_vcf, by: 0)
     }
 
-    BCFTOOLS_ENSEMBLE(ch_ensemble_input)
+    // 性別感知倍體定義（單一真相來源；+fixploidy 用，未來 ploidy-aware calling 也由此推導）
+    ch_sex_ploidy = file(params.sex_ploidy_file, checkIfExists: true)
+    BCFTOOLS_ENSEMBLE(ch_ensemble_input, ch_sex_ploidy)
 
     // ROH（選用，皆預設關閉；ROH 不納入評鑑）：用 HaplotypeCaller VCF（保留 GT/AD）。
     //   --run_roh     → bcftools roh（MIT/GPL，可商用）

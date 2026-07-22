@@ -81,6 +81,8 @@ process BCFTOOLS_ENSEMBLE {
     tuple val(meta),
         path(dv_vcf), path(dv_tbi),
         path(hc_vcf), path(hc_tbi)
+    // 性別感知倍體定義（單一真相來源；params.sex_ploidy_file，staged）
+    path ploidy_file
         
     // OUTPUT:
     //   vcf - 兩個 caller 合併且校正過 ploidy後的 ensemble VCF（含 SOURCE INFO tag，2 samples）
@@ -157,26 +159,15 @@ process BCFTOOLS_ENSEMBLE {
     echo "${prefix}_DV ${sex}" > sample_sex.txt
     echo "${prefix}_HC ${sex}" >> sample_sex.txt
 
-    # B. 建立 hg38 的倍體定義檔 (Ploidy Map)
-    # 定義男性 (M) 的 chrX 非 PAR 區和 chrY 為單倍體 (1)，其餘皆為二倍體 (2)
-    # (1-10000 是 N，所以從 1 開始寫也沒差，結尾精準對齊你的 2781479)
-    cat <<EOF > hg38_ploidy.txt
-chrX 1 2781479 M 2
-chrX 2781480 155701382 M 1
-chrX 155701383 156030895 M 2
-chrX 156030896 156040895 M 1
-chrY 1 57227415 M 1
-chrX 1 156040895 F 2
-chrM 1 16569 * 1
-* * * * 2
-EOF
+    # B. 倍體定義檔 (Ploidy Map) 改由 config 的 params.sex_ploidy_file 傳入（單一真相來源，
+    #    格式 CHROM FROM TO SEX PLOIDY，GRCh38 PAR 座標）。以 staged input 進來，見上方 input。
 
     # -------------------------------------------------------------
     # 4. 執行 bcftools +fixploidy 進行優雅校正
     # -------------------------------------------------------------
     bcftools +fixploidy ${prefix}.ensemble.raw.vcf.gz \\
         -O z -o ${prefix}.ensemble.fixed.vcf.gz \\
-        -- -s sample_sex.txt -p hg38_ploidy.txt
+        -- -s sample_sex.txt -p ${ploidy_file}
 
     bcftools index --tbi ${prefix}.ensemble.fixed.vcf.gz
 
@@ -189,7 +180,7 @@ EOF
     # -------------------------------------------------------------
     # 6. 清理所有暫存檔
     # -------------------------------------------------------------
-    rm -f rename_dv.txt rename_hc.txt rn_dv.vcf.gz* rn_hc.vcf.gz* hdr_dv.txt hdr_hc.txt fx_dv.vcf.gz* fx_hc.vcf.gz* temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt hg38_ploidy.txt ${prefix}.ensemble.raw.vcf.gz*
+    rm -f rename_dv.txt rename_hc.txt rn_dv.vcf.gz* rn_hc.vcf.gz* hdr_dv.txt hdr_hc.txt fx_dv.vcf.gz* fx_hc.vcf.gz* temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt ${prefix}.ensemble.raw.vcf.gz*
     """
     // # -------------------------------------------------------------
     // # 方案 B：嚴格取交集 (Intersection) -> 產出 1 個 Sample 欄位的 VCF
