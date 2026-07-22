@@ -426,10 +426,73 @@ process GATK_POSTPROCESS_CNV {
 
 
 // ──────────────────────────────────────────────────────────────
-// CALL_CNV_SV sub-workflow（Lane 3）：CNVkit（WGS）＋ Delly SV ＋選用 Manta ＋ gCNV（WES+PON）。
-//   對外吃 bam_ch 與 dv_vcf（CNVkit 用 DeepVariant VCF 當 SNP b-allele 輸入）；fasta/dict、
-//   PON、blacklist、gCNV 模型路徑一律內部依 params 建立。所有輸出各自 publishDir 到 05_cnv_sv，
-//   主流程不需再接 → 無 emit。seq_type / run_manta / run_gcnv 條件原封保留。
+// DELLY 第二層 sub-workflow：Delly germline SV call → BCF 轉 VCF（BSD；取代 Manta）。
+//   delly 排除區 BED 內部依 params.delly_excl 建立。發布到 05_cnv_sv。
+// ──────────────────────────────────────────────────────────────
+workflow DELLY {
+    take:
+    bam_ch
+    fasta
+    fasta_fai
+
+    main:
+    ch_delly_excl = params.delly_excl ? file(params.delly_excl) : file("NO_FILE")
+    DELLY_GERMLINE(bam_ch, fasta, fasta_fai, ch_delly_excl)
+    BCFTOOLS_CONVERT_DELLY(DELLY_GERMLINE.out.bcf)
+}
+
+// ──────────────────────────────────────────────────────────────
+// GCNV 第二層 sub-workflow（WES）：GATK gCNV case mode 四步
+//   collect-read-counts → ploidy-case → germline-cnv-case → postprocess。
+//   gCNV PON / ploidy model / model shards 內部依 params 建立。發布到 05_cnv_sv。
+// ──────────────────────────────────────────────────────────────
+workflow GCNV {
+    take:
+    bam_ch
+    fasta
+    fasta_fai
+    fasta_dict
+
+    main:
+    ch_gcnv_intervals    = file(params.gcnv_pon_dir)
+    ch_ploidy_model      = file(params.gcnv_ploidy_model_dir)
+    ch_model_shards_list = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir').collect()
+    ch_model_shards_flat = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir')
+
+    GATK_COLLECT_READ_COUNTS(
+        bam_ch, fasta, fasta_fai, fasta_dict,
+        ch_gcnv_intervals
+    )
+    GATK_PLOIDY_CASE(
+        GATK_COLLECT_READ_COUNTS.out.counts,
+        ch_ploidy_model
+    )
+    ch_gcnv_caller_in = GATK_COLLECT_READ_COUNTS.out.counts
+        .join(GATK_PLOIDY_CASE.out.ploidy_calls)
+        .combine(ch_model_shards_flat)
+
+    GATK_GERMLINE_CNV_CASE(ch_gcnv_caller_in)
+
+    ch_postprocess_in = GATK_GERMLINE_CNV_CASE.out.call_shard
+        .groupTuple()
+        .join(GATK_PLOIDY_CASE.out.ploidy_calls)
+
+    GATK_POSTPROCESS_CNV(
+        ch_postprocess_in,
+        ch_model_shards_list,
+        fasta_dict
+    )
+}
+
+// ──────────────────────────────────────────────────────────────
+// CALL_CNV_SV sub-workflow（Lane 3）：組合各 caller。多 process 的 caller（Delly、gCNV）各自
+//   為第二層 sub-workflow；單 process 的（CNVkit、Manta）直接裸呼叫。
+//   對外吃 bam_ch 與 dv_vcf（CNVkit 的 SNP b-allele 輸入）；fasta/dict 內部依 params 建立。
+//   所有輸出各自 publishDir 到 05_cnv_sv → 無 emit。
+//     - CNVkit：WGS only
+//     - Delly ：WGS + WES 皆跑
+//     - Manta ：--run_manta（選用，非商用）
+//     - gCNV  ：WES + --run_gcnv（WGS 不支援 gCNV，改用 CNVkit）
 // ──────────────────────────────────────────────────────────────
 workflow CALL_CNV_SV {
     take:
@@ -441,58 +504,22 @@ workflow CALL_CNV_SV {
     ch_fasta_fai  = file("${params.fasta}.fai")
     ch_fasta_dict = file(params.fasta.replace('.fasta', '.dict'))
 
-    // Lane 3a: CNVkit（WGS only）
+    // CNVkit（WGS only；單 process）
     if (params.seq_type == "WGS") {
         ch_cnvkit_pon = params.cnvkit_pon ? file(params.cnvkit_pon) : file("NO_FILE")
-        CNVKIT_BATCH(
-            bam_ch,
-            dv_vcf,
-            ch_fasta,
-            ch_cnvkit_pon
-        )
+        CNVKIT_BATCH(bam_ch, dv_vcf, ch_fasta, ch_cnvkit_pon)
     }
 
-    // Lane 3b: Delly SV calling（替代 Manta，BSD license）
-    ch_delly_excl = params.delly_excl ? file(params.delly_excl) : file("NO_FILE")
-    DELLY_GERMLINE(bam_ch, ch_fasta, ch_fasta_fai, ch_delly_excl)
-    BCFTOOLS_CONVERT_DELLY(DELLY_GERMLINE.out.bcf)
+    // Delly SV（2 process → 第二層 sub-workflow）
+    DELLY(bam_ch, ch_fasta, ch_fasta_fai)
 
-    // Lane 3b（選用）: Manta SV calling（--run_manta，預設關閉；非商用授權）
+    // Manta（--run_manta，選用；單 process）
     if (params.run_manta) {
         MANTA_GERMLINE(bam_ch, ch_fasta, ch_fasta_fai)
     }
 
-    // Lane 3c: gCNV (WES only，需 --run_gcnv true 且已有 PON)
+    // gCNV（WES + --run_gcnv；4 process → 第二層 sub-workflow）。WGS 用 CNVkit，不跑 gCNV。
     if (params.seq_type == "WES" && params.run_gcnv) {
-        ch_gcnv_intervals    = file(params.gcnv_pon_dir)
-        ch_ploidy_model      = file(params.gcnv_ploidy_model_dir)
-        ch_model_shards_list = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir').collect()
-        ch_model_shards_flat = Channel.fromPath("${params.gcnv_model_dir}/**/*-model", type: 'dir')
-
-        GATK_COLLECT_READ_COUNTS(
-            bam_ch, ch_fasta, ch_fasta_fai, ch_fasta_dict,
-            ch_gcnv_intervals
-        )
-        GATK_PLOIDY_CASE(
-            GATK_COLLECT_READ_COUNTS.out.counts,
-            ch_ploidy_model
-        )
-        ch_gcnv_caller_in = GATK_COLLECT_READ_COUNTS.out.counts
-            .join(GATK_PLOIDY_CASE.out.ploidy_calls)
-            .combine(ch_model_shards_flat)
-
-        GATK_GERMLINE_CNV_CASE(ch_gcnv_caller_in)
-
-        ch_postprocess_in = GATK_GERMLINE_CNV_CASE.out.call_shard
-            .groupTuple()
-            .join(GATK_PLOIDY_CASE.out.ploidy_calls)
-
-        GATK_POSTPROCESS_CNV(
-            ch_postprocess_in,
-            ch_model_shards_list,
-            ch_fasta_dict
-        )
-    } else if (params.seq_type == "WGS" && params.run_gcnv) {
-        log.warn "WGS 模式不支援 gCNV，忽略 --run_gcnv 參數"
+        GCNV(bam_ch, ch_fasta, ch_fasta_fai, ch_fasta_dict)
     }
 }
