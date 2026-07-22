@@ -69,7 +69,7 @@ include { CNVKIT_BATCH;
 include { GANGSTR_CHROM;
           GANGSTR_MERGE;
           EXPANSIONHUNTER }                from './modules/repeat'
-include { CALL_MITO }                       from './subworkflows/call_mito'
+include { CALL_MITO }                       from './modules/call_mito'
 include { BGZIP_VCF as BGZIP_VCF_DV;
           BGZIP_VCF as BGZIP_VCF_HC;
           BCFTOOLS_ENSEMBLE;

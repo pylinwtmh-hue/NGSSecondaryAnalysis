@@ -1,7 +1,7 @@
 /*
  * =========================================================
  * WGS/WES Germline Analysis Pipeline
- * subworkflows/call_mito.nf
+ * modules/call_mito.nf
  * =========================================================
  * 粒線體變異呼叫 sub-workflow（Lane 5）。把 modules/mitochondria.nf 的 12 個 MITO_* process
  * 組合起來：extract → (normal / shifted 兩路 bwa+sort) → Mutect2 → liftover → merge → filter。
@@ -10,7 +10,8 @@
  * （MITO_FILTER 自己 publishDir 到 07_mitochondria，主流程通常不需再接）。
  *
  * 註：MITO_SORT_MARKDUP 需用兩次（normal / shifted），靠 include-time 別名區分 —— 這也是為何
- *     本 sub-workflow 放在獨立檔（Nextflow 無法對「同檔內定義」的 process 取別名）。
+ *     本 sub-workflow 獨立成一個 module 檔（Nextflow 無法對「同檔內定義」的 process 取別名），
+ *     而不是寫進 mitochondria.nf 本身。
  */
 
 include { MITO_EXTRACT_READS;
@@ -24,7 +25,7 @@ include { MITO_EXTRACT_READS;
           MITO_MUTECT2_SHIFTED;
           MITO_LIFTOVER;
           MITO_MERGE;
-          MITO_FILTER }                     from '../modules/mitochondria'
+          MITO_FILTER }                     from './mitochondria'
 
 workflow CALL_MITO {
     take:
