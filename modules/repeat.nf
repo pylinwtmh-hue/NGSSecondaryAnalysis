@@ -158,10 +158,13 @@ process EXPANSIONHUNTER {
     //   vcf  - STR genotype VCF（每個 locus 的 repeat 數估計）
     //   json - STR genotype JSON（詳細資訊，含 read support 圖）
     //   bam  - 可以用IGV視覺化證據檔
+    // 檔名用 .expansionhunter.* 而非 .str.*：GangSTR 合併輸出是 ${meta.id}.str.vcf，兩者
+    // 同 publishDir 到 06_repeat，若 EH 也叫 .str.vcf 會「後到覆蓋」互相蓋掉（三級也讀
+    // *.str.vcf）。EH 為選用研究工具，改名讓它與主線 GangSTR 並存、互不衝突。
     output:
-    tuple val(meta), path("*.str.vcf"), emit: vcf
-    path "*.str.json",                  emit: json
-    path "*.str_realigned.bam",         emit: bamlet
+    tuple val(meta), path("*.expansionhunter.vcf"), emit: vcf
+    path "*.expansionhunter.json",                  emit: json
+    path "*.expansionhunter_realigned.bam",         emit: bamlet
 
     script:
     // 嚴格的性別字串轉換 (M/F -> male/female)
@@ -170,13 +173,13 @@ process EXPANSIONHUNTER {
         def s = meta.sex.toString().toLowerCase()
         if (s == 'm' || s == 'male') { sex_str = 'male' }
     }
-    
+
     """
     ExpansionHunter \
         --reads ${bam} \
         --reference ${fasta} \
         --variant-catalog ${str_catalog} \
-        --output-prefix ${meta.id}.str \
+        --output-prefix ${meta.id}.expansionhunter \
         --sex ${sex_str} \
         --threads ${task.cpus}
     """
