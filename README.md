@@ -495,7 +495,7 @@ records; `PS` = phase-set, `|` = phased genotype). This is the file tertiary ana
 | File | Mode | Description |
 |------|------|-------------|
 | `<id>.delly.vcf.gz` (+ `.tbi`) | WGS + WES | Delly SV, **PASS-only**. INFO `SVTYPE` (DEL/DUP/INV/BND/INS), `END`, `SVLEN`; FORMAT includes `RDCN` (read-depth copy number) |
-| `<id>.call.cns` | **[WGS]** | CNVkit absolute-CN segments — cols `chromosome start end gene log2 cn depth probes weight` (`cn` = integer copy number; b-allele + sex aware; the file tertiary consumes) |
+| `<id>.call.cns` | **[WGS]** | CNVkit absolute-CN segments — cols `chromosome start end gene log2 baf ci_hi ci_lo cn cn1 cn2 depth probes weight` (`cn` = total integer copy number, `cn1`/`cn2` = allele-specific CN, `baf` = B-allele frequency from the DeepVariant VCF; sex-aware; the file tertiary consumes) |
 | `<id>.aligned.sorted.cns` / `.cnr` | **[WGS]** | CNVkit segmented / per-bin log2 ratios |
 | `<id>-scatter.pdf` / `-diagram.pdf` | **[WGS]** | CNVkit plots |
 | `<id>.gcnv.vcf.gz` (+ `.tbi`) | **[WES, --run_gcnv]** | GATK gCNV segments — FORMAT `GT:CN:NP:QA:QS:QSE:QSS` (`CN` = copy number, `NP` = # bins, `QS` = quality score) |
@@ -513,7 +513,7 @@ records; `PS` = phase-set, `|` = phased genotype). This is the file tertiary ana
 ### 07_mitochondria — chrM (Mutect2)
 | File | Description |
 |------|-------------|
-| `<id>.mito.vcf.gz` (+ `.tbi`) | chrM variants: 2-pass (normal + shifted origin) → liftover → merge → FilterMutectCalls (`--mitochondria-mode`) + blacklist mask. FORMAT `GT:AD:AF:DP:…` (`AF` = heteroplasmy fraction). `FILTER=PASS` = confident; `weak_evidence` / `strand_bias` / `base_qual` / `blacklisted_site` = filtered |
+| `<id>.mito.vcf.gz` (+ `.tbi`) | chrM variants: 2-pass (normal + shifted origin) → liftover → merge → FilterMutectCalls (`--mitochondria-mode`) + blacklist mask. FORMAT `GT:AD:AF:DP:F1R2:F2R1:FAD:SB` (`AF` = heteroplasmy fraction, `AD` = allele depths, `SB` = strand bias). `FILTER=PASS` = confident; `weak_evidence` / `strand_bias` / `base_qual` / `blacklisted_site` = filtered |
 
 ### 08_roh — runs of homozygosity
 | File | Description |
