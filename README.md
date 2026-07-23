@@ -12,19 +12,23 @@ A clinical-grade Nextflow DSL2 pipeline for whole-genome and whole-exome sequenc
 
 This pipeline performs secondary analysis of germline variants from short-read sequencing data (Illumina). It supports both WGS and WES modes, and is optimized for GPU-accelerated computing using NVIDIA Clara Parabricks.
 
-A single entry point (`main.nf`) is used. Optional callers are toggled by flags
-(all default **off**):
+A single entry point (`main.nf`) is used, selected with `--seq_type WGS|WES`.
+Behaviour is controlled by flags — the table shows their **current defaults**:
 
-| Optional tool | Flag | License |
-|---------------|------|---------|
-| Manta (SV) | `--run_manta` | PolyForm Strict 1.0.0 ⚠️ |
-| ExpansionHunter (STR) | `--run_expansionhunter` | PolyForm Strict 1.0.0 ⚠️ |
-| ROH — AutoMap | `--run_automap` | none published ⚠️ |
+| Flag | Effect | Default | License |
+|------|--------|---------|---------|
+| `--run_phasing` | WhatsHap phasing + compound (MNV) merging, per caller, before the ensemble | **on** | — |
+| `--run_gcnv` | GATK germline gCNV (WES only; requires a PON) | **on** | — |
+| `--run_roh` | ROH via bcftools roh | **on** | MIT/GPL ✅ |
+| `--run_manta` | Manta SV calling | off | PolyForm Strict 1.0.0 ⚠️ |
+| `--run_expansionhunter` | ExpansionHunter STR | off | PolyForm Strict 1.0.0 ⚠️ |
+| `--run_automap` | ROH via AutoMap | off | none published ⚠️ |
 
-> Defaults reproduce the evaluated outputs — Delly (SV) + GangSTR (STR) + mito + CNV,
-> with Manta / ExpansionHunter off. **ROH is off by default** (not part of the
-> evaluation); enable it with `--run_roh` (bcftools roh, commercial-safe) or, for
-> non-commercial use, `--run_automap` (AutoMap).
+> **Commercial-safe by default.** The default path uses only commercially-usable tools
+> (DeepVariant, HaplotypeCaller, Delly, CNVkit, gCNV, GangSTR, bcftools roh, mtDNA Mutect2).
+> The three non-commercial tools (Manta / ExpansionHunter / AutoMap) stay **off** unless
+> explicitly enabled. `--run_gcnv false` is an escape hatch for WES when the PON is not
+> built yet.
 
 ---
 
@@ -32,58 +36,50 @@ A single entry point (`main.nf`) is used. Optional callers are toggled by flags
 
 ### `main.nf` — Clinical Pipeline
 
+`main.nf` is composed of one sub-workflow per stage (`modules/*.nf`); the workflow
+body is pure composition. Per-sample lanes below run in parallel off the same BAM.
+
 ```
-FASTQ (R1, R2)
-       │
-       ▼
-┌─────────────────────────────────────────────────────────┐
-│  Step 0 · Preprocessing                                 │
-│  FASTP (adapter trimming, QC)                           │
-└───────────────────────┬─────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│  Step 1 · Alignment (GPU)                               │
-│  Parabricks fq2bam (BWA-MEM2 + BQSR)                    │
-└───────────────────────┬─────────────────────────────────┘
-                        │
-          ┌─────────────┴─────────────┐
-          ▼                           ▼
-┌──────────────────┐       ┌──────────────────────────────┐
-│  Step 2 · QC     │       │  Step 3 · Parallel Calling   │
-│  SAMtools stats  │       │                              │
-│  Mosdepth        │       │  Lane 1 ── DeepVariant (GPU) │
-└──────────────────┘       │  Lane 2a── HaplotypeCaller   │
-                           │           (GPU)              │
-                           │  Lane 2b── GATK VQSR         │
-                           │           (WGS only)         │
-                           │  Lane 3a── CNVkit            │
-                           │  Lane 3b── DELLY ◀ clinical  │
-                           │  Lane 3c── gCNV              │
-                           │           (WES + PON only)   │
-                           │  Lane 4 ── GANGSTR ◀ clinical│
-                           │  Lane 5 ── GATK Mutect2      │
-                           │           (mitochondria)     │
-                           └──────────────┬───────────────┘
+FASTQ (R1, R2 — multi-lane per sample supported)
+   │
+   ▼  FASTP ── adapter trim + quality filter ─────────────────────► 01_preprocessing
+   │
+   ▼  PARABRICKS_FQ2BAM (GPU) ── BWA-MEM + BQSR, lanes merged ─────► 02_alignment
+   │
+   ├── ALIGNMENT_QC ──────────────────────────────────────────────► 03_alignment_qc
+   │     samtools stats · mosdepth (WGS: autosome BED / WES: capture BED)
+   │     PLOIDY_CHECK  ── sex + per-contig ploidy QC (mosdepth-based)
+   │
+   ├── CALL_SNV ──────────────────────────────────────────────────► 04_snv_indel
+   │     DEEPVARIANT (GPU) · HAPLOTYPECALLER (GPU) · VQSR (WGS only)
+   │     [--run_phasing] WhatsHap phase + combine_phased.py  (per caller)
+   │        └─► BCFTOOLS_ENSEMBLE  (DV+HC union, +fixploidy) ─► *.ensemble.fixed.vcf.gz
+   │
+   ├── CALL_CNV_SV ───────────────────────────────────────────────► 05_cnv_sv
+   │     DELLY (SV, PASS-only) · CNVKIT (WGS) · GCNV (WES, --run_gcnv) · [MANTA]
+   │
+   ├── CALL_STR ──────────────────────────────────────────────────► 06_repeat
+   │     GangSTR (24-contig scatter → merge) · [ExpansionHunter]
+   │
+   ├── CALL_MITO ─────────────────────────────────────────────────► 07_mitochondria
+   │     Mutect2 2-pass (normal + shifted) → liftover → merge → filter
+   │
+   └── CALL_ROH ──────────────────────────────────────────────────► 08_roh
+         bcftools roh (--run_roh) · [AutoMap --run_automap]
                                           │
                                           ▼
-                           ┌──────────────────────────────┐
-                           │  Step 4 · Post-processing    │
-                           │  BCFtools Ensemble           │
-                           │  (DV + HC/VQSR merge)        │
-                           │  AutoMap ROH                 │
-                           │  BCFtools Stats              │
-                           │  MultiQC                     │
-                           └──────────────────────────────┘
+   BCFTOOLS_STATS (DV + ensemble) ─► 09_postprocessing   ·   MULTIQC ─► pipeline_info/
 ```
 
-### Default vs optional callers
+### Callers by stage (sub-workflow)
 
-| Step | Default (always runs) | Optional (opt-in flag) |
-|------|-----------------------|------------------------|
-| **SV calling** (Lane 3b) | Delly v1.7.3 — BSD-3 | Manta v1.6.0 — PolyForm Strict ⚠️ (`--run_manta`) |
-| **STR calling** (Lane 4) | GangSTR v2.5.0 — GPL | ExpansionHunter v5.0.0 — PolyForm Strict ⚠️ (`--run_expansionhunter`) |
-| **ROH** | bcftools roh — MIT/GPL | AutoMap (`--run_automap`, no license ⚠️) |
+| Stage | Default (always runs) | Optional (opt-in flag) |
+|-------|-----------------------|------------------------|
+| SNV/indel · `CALL_SNV` | DeepVariant + HaplotypeCaller → ensemble; VQSR (WGS only) | — |
+| CNV/SV · `CALL_CNV_SV` | Delly (SV, BSD-3) + CNVkit **[WGS]** / gCNV **[WES]** | Manta — PolyForm Strict ⚠️ (`--run_manta`) |
+| STR · `CALL_STR` | GangSTR v2.5.0 — GPL | ExpansionHunter — PolyForm Strict ⚠️ (`--run_expansionhunter`) |
+| mtDNA · `CALL_MITO` | GATK Mutect2 (2-pass, shifted origin) | — |
+| ROH · `CALL_ROH` | bcftools roh — MIT/GPL | AutoMap — no license ⚠️ (`--run_automap`) |
 
 ---
 
@@ -164,6 +160,19 @@ apptainer build gangstr_2.5.0.sif    docker://quay.io/biocontainers/gangstr:2.5.
 
 # Mitochondria alignment
 apptainer build bwa_0.7.19.sif       docker://quay.io/biocontainers/bwa:0.7.19--h577a1d6_1
+
+# Phasing (default on: --run_phasing) + Python QC scripts
+apptainer build whatshap_2.8.sif     docker://quay.io/biocontainers/whatshap:2.8--py39h2de1943_0
+# combine_phased.py (compound merge) and ploidy_check.py (sex/ploidy QC) need only
+# Python 3 stdlib + bcftools; the config names this image tertiary_python_1.0.0.sif.
+# Reuse the tertiary repo's container, or build any Python-3-plus-bcftools image:
+cat > tertiary_python.def << 'EOF'
+Bootstrap: docker
+From: python:3.11-slim
+%post
+    apt-get update && apt-get install -y bcftools && rm -rf /var/lib/apt/lists/*
+EOF
+apptainer build tertiary_python_1.0.0.sif tertiary_python.def
 
 # ROH
 # AutoMap is not on bioconda — build from .def file
@@ -247,9 +256,16 @@ bedtools intersect \
 mv hg38_ver17.bed gangstr_hg38_ver17.bed
 
 # --- Autosome BED for WGS depth QC (chr1-22 only) ---
+# Used by mosdepth --by in WGS mode so the mean-coverage QC metric is not skewed by
+# chrM (high copy), sex chromosomes, or decoy/unplaced contigs.
 awk 'BEGIN{OFS="\t"} /^chr([1-9]|1[0-9]|2[0-2])\t/{print $1, 0, $2}' \
     Homo_sapiens_assembly38.fasta.fai \
     > hg38_autosome_primary.bed
+
+# --- Sex/ploidy map for bcftools +fixploidy (single source of truth) ---
+# Format: CHROM FROM TO SEX PLOIDY, with GRCh38 PAR coordinates. Versioned template
+# lives in the repo at assets/sex_ploidy_GRCh38.txt; copy it into the reference dir.
+cp /path/to/pipeline_code/assets/sex_ploidy_GRCh38.txt sex_ploidy_GRCh38.txt
 
 # --- CNV blacklist (PAR + centromere + telomere) ---
 # Download gap table from UCSC Table Browser:
@@ -385,24 +401,139 @@ nextflow -c ${PIPELINE_CONFIG} run ${PIPELINE_CODE}/main.nf \
     --out_dir /path/to/output \
     -resume
 ```
---run_manta --run_expansionhunter --run_automap if you want to run these 3 research tool
+**Flag notes**
+
+- Phasing (`--run_phasing`), ROH via bcftools (`--run_roh`), and — for WES — gCNV
+  (`--run_gcnv`) are **on by default**; you do not need to pass them. `--run_gcnv true`
+  above is explicit for clarity.
+- Add `--run_manta --run_expansionhunter --run_automap` only to enable the three
+  non-commercial research tools (all off by default).
+- Escape hatches: `--run_phasing false` skips WhatsHap/compound merging;
+  `--run_gcnv false` skips WES gCNV when the PON is not built yet.
 
 ---
 
 ## Output Structure
 
+Per-sample outputs go under `{out_dir}/{SAMPLE_ID}/NN_stage/`; run-level reports go to
+`{out_dir}/pipeline_info/`. Files tagged **[WGS]** / **[WES]** appear only in that mode;
+**[opt]** only when the corresponding flag is on.
+
 ```
-{out_dir}/{SAMPLE_ID}/
-├── 01_preprocessing/         FASTP QC reports
-├── 02_alignment/             BAM + recalibration table
-├── 03_alignment_qc/          SAMtools stats + Mosdepth
-├── 04_snv_indel/             DeepVariant + HaplotypeCaller + Ensemble VCF
-├── 05_cnv_sv/                CNVkit + Delly (or Manta) + gCNV
-├── 06_repeat/                GangSTR (or ExpansionHunter) STR
-├── 07_mitochondria/          mtDNA variants (Mutect2)
-├── 08_roh/                   ROH regions (bcftools roh / automap)
-└── pipeline_info/            Execution reports
+{out_dir}/
+├── {SAMPLE_ID}/
+│   ├── 01_preprocessing/     fastp trimmed reads + QC
+│   ├── 02_alignment/         analysis-ready BAM + BQSR table + dup metrics
+│   ├── 03_alignment_qc/      samtools stats, mosdepth depth, sex/ploidy QC
+│   ├── 04_snv_indel/         DeepVariant, HaplotypeCaller, (VQSR), ensemble
+│   ├── 05_cnv_sv/            Delly SV + CNVkit [WGS] / gCNV [WES]
+│   ├── 06_repeat/            GangSTR STR
+│   ├── 07_mitochondria/      chrM variants (Mutect2)
+│   ├── 08_roh/               runs of homozygosity
+│   └── 09_postprocessing/    per-VCF bcftools stats
+└── pipeline_info/            MultiQC report + Nextflow execution reports
 ```
+
+### 01_preprocessing — fastp
+| File | Description |
+|------|-------------|
+| `<id>_{1,2}.fastp.fastq.gz` | adapter-trimmed, quality-filtered reads (one pair per lane if multi-lane) |
+| `<id>.fastp.json` | machine-readable QC (consumed by MultiQC) |
+| `<id>.fastp.html` | human-readable QC report |
+
+Filtering: adapter auto-detect, `--cut_front/--cut_tail` mean Q20, min length 50, qualified Q15.
+
+### 02_alignment — Parabricks fq2bam
+| File | Description |
+|------|-------------|
+| `<id>.aligned.sorted.bam` (+ `.bai`) | BWA-MEM aligned, duplicate-marked, BQSR-applied; all lanes merged |
+| `<id>.recal.txt` | BQSR recalibration table |
+| `<id>.duplicate_metrics.txt` | duplicate metrics (MultiQC) |
+| `qc_metrics_dir/` | Parabricks built-in QC (insert size, coverage) |
+
+### 03_alignment_qc — samtools + mosdepth + ploidy
+| File | Description |
+|------|-------------|
+| `<id>.stats` | `samtools stats` (mapping/error rate, insert size) |
+| `<id>.mosdepth.summary.txt` | per-contig depth — columns `chrom length bases mean min max` |
+| `<id>.mosdepth.global.dist.txt` | cumulative coverage distribution (MultiQC) |
+| `<id>.regions.bed.gz` (+ `.csi`) | per-region mean depth (`--by` = autosome BED [WGS] / capture BED [WES]) |
+| `<id>.thresholds.bed.gz` (+ `.csi`) | bases covered ≥ 1,10,15,20,30,50,100× per region |
+| `<id>.ploidy.vcf.gz` | sex/ploidy QC, DRAGEN-style (see below) |
+| `<id>.ploidy_qc.txt` | human-readable sex-check + per-contig NDC/RATIO + warnings |
+
+**Sex/ploidy QC** (`ploidy_check.py`, mosdepth-based — used for **both** WGS and WES; for
+WES, gCNV also computes its own internal contig-ploidy, which is *not* published here).
+`ploidy.vcf.gz` has one record per **primary contig only** (chr1-22, X, Y, M):
+
+| Field | Meaning |
+|-------|---------|
+| `FORMAT/DC` | mean depth of coverage |
+| `FORMAT/NDC` | depth normalized to the **expected** ploidy for the estimated karyotype (~1.0 = as-expected; `.` for chrM, which is high-copy and not a ploidy unit) |
+| `FORMAT/RATIO` | raw depth ÷ autosomal median (~1.0 diploid, ~0.5 male hemizygous chrX/Y) |
+| `FILTER` | `PASS`, or `SUSPECT` when NDC deviates → possible aneuploidy |
+| `##estimatedSexKaryotype` / `##referenceSexKaryotype` (header) | data-inferred vs samplesheet-declared karyotype (keys aligned with DRAGEN) |
+
+Warn-only: a sex mismatch or aneuploidy prints a WARNING but never changes calls or fails the run.
+
+### 04_snv_indel — SNV / indel
+| File | Description |
+|------|-------------|
+| `<id>.deepvariant.vcf.gz` (+ `.tbi`) | DeepVariant calls |
+| `<id>.haplotypecaller.vcf.gz` (+ `.tbi`) | HaplotypeCaller calls (GT/AD preserved; feeds ROH) |
+| `<id>.vqsr_snp.vcf.gz`, `<id>.vqsr_indel.vcf.gz` **[WGS]** | VQSR-filtered HC (WES skips VQSR) |
+| `<id>.snp.recal`, `<id>.snp.tranches` **[WGS]** | VQSR model + tranches |
+| `<id>.ensemble.fixed.vcf.gz` (+ `.tbi`) | **main output** — DV + HC merged |
+
+**`ensemble.fixed.vcf.gz`** has **two sample columns**, `<id>_DV` and `<id>_HC` (provenance =
+which caller populated each genotype). It is biallelic-split, sex-ploidy corrected
+(`bcftools +fixploidy`), and — with `--run_phasing` — phased with adjacent *cis* variants
+merged into single MNVs. FORMAT `GT:GQ:DP:AD:VAF:PL:PS` (`AD`/`VAF` depth preserved on merged
+records; `PS` = phase-set, `|` = phased genotype). This is the file tertiary analysis reads.
+
+### 05_cnv_sv — copy number & structural variants
+| File | Mode | Description |
+|------|------|-------------|
+| `<id>.delly.vcf.gz` (+ `.tbi`) | WGS + WES | Delly SV, **PASS-only**. INFO `SVTYPE` (DEL/DUP/INV/BND/INS), `END`, `SVLEN`; FORMAT includes `RDCN` (read-depth copy number) |
+| `<id>.call.cns` | **[WGS]** | CNVkit absolute-CN segments — cols `chromosome start end gene log2 cn depth probes weight` (`cn` = integer copy number; b-allele + sex aware; the file tertiary consumes) |
+| `<id>.aligned.sorted.cns` / `.cnr` | **[WGS]** | CNVkit segmented / per-bin log2 ratios |
+| `<id>-scatter.pdf` / `-diagram.pdf` | **[WGS]** | CNVkit plots |
+| `<id>.gcnv.vcf.gz` (+ `.tbi`) | **[WES, --run_gcnv]** | GATK gCNV segments — FORMAT `GT:CN:NP:QA:QS:QSE:QSS` (`CN` = copy number, `NP` = # bins, `QS` = quality score) |
+| `<id>.denoisedCR.tsv` | **[WES, --run_gcnv]** | gCNV denoised copy-ratio matrix |
+| `manta_results/results/variants/diploidSV.vcf.gz` | **[opt --run_manta]** | Manta SV calls |
+
+> Depth-CNV caller differs by mode: **WGS → CNVkit**, **WES → gCNV**; Delly (SV) runs in both.
+
+### 06_repeat — short tandem repeats
+| File | Description |
+|------|-------------|
+| `<id>.str.vcf` | GangSTR genotypes (24-contig scatter → merge). FORMAT `GT:DP:Q:REPCN:REPCI:…` (`REPCN` = repeat copy number per allele, `REPCI` = confidence interval) |
+| `<id>.expansionhunter.{vcf,json}`, `<id>.expansionhunter_realigned.bam` | **[opt --run_expansionhunter]** ExpansionHunter genotypes + evidence BAMlet (named `.expansionhunter.*` so it never clobbers the GangSTR `.str.vcf`) |
+
+### 07_mitochondria — chrM (Mutect2)
+| File | Description |
+|------|-------------|
+| `<id>.mito.vcf.gz` (+ `.tbi`) | chrM variants: 2-pass (normal + shifted origin) → liftover → merge → FilterMutectCalls (`--mitochondria-mode`) + blacklist mask. FORMAT `GT:AD:AF:DP:…` (`AF` = heteroplasmy fraction). `FILTER=PASS` = confident; `weak_evidence` / `strand_bias` / `base_qual` / `blacklisted_site` = filtered |
+
+### 08_roh — runs of homozygosity
+| File | Description |
+|------|-------------|
+| `<id>.roh.txt` | bcftools roh (`-O r` region format). Cols: `RG  Sample  Chromosome  Start  End  Length(bp)  #markers  Quality` |
+| `<id>.HomRegions.tsv` / `.pdf` | **[opt --run_automap]** AutoMap ROH table + plot |
+
+Both consume the HaplotypeCaller raw VCF (needs GT + AD; not VQSR/DeepVariant).
+
+### 09_postprocessing — per-VCF stats
+| File | Description |
+|------|-------------|
+| `<id>.deepvariant.vcf.stats` | `bcftools stats` on DeepVariant (counts, Ti/Tv, indel distribution) — MultiQC |
+| `<id>.ensemble.fixed.vcf.stats` | `bcftools stats` on the ensemble VCF — MultiQC |
+
+### pipeline_info/ (run-level)
+| File | Description |
+|------|-------------|
+| `multiqc_report.html` (+ `multiqc_report_data/`) | aggregated QC across fastp, samtools, mosdepth, bcftools stats |
+| Nextflow `report` / `timeline` / `trace` | run provenance (when enabled in the config) |
 
 ---
 
@@ -473,6 +604,24 @@ Expected QC values:
 | Mito PASS variants | 35–100 | 35–100 |
 | Mapping rate | >99% | >98% |
 | Mean depth | >100x (clinical) | >30x |
+
+Structural / QC invariants to check on every run:
+
+| Check | Expected |
+|-------|----------|
+| `ensemble.fixed.vcf.gz` sample columns | `<id>_DV` **and** `<id>_HC` |
+| Ensemble FORMAT (with `--run_phasing`) | `GT:GQ:DP:AD:VAF:PL:PS` — `AD`/`VAF` non-empty, some genotypes phased (`\|`) |
+| Delly `FILTER` | `PASS` only |
+| CNV caller | WGS → CNVkit `call.cns`; WES → `gcnv.vcf.gz` |
+| Sex-check (`ploidy_qc.txt`) | `estimated == declared` karyotype → `sex_check: OK` |
+
+> Validated (2026-07) on NA12878 (WES) and an internal WGS sample after the sub-workflow
+> refactor: all nine output stages populate; the ensemble preserves `AD`/`VAF` and phasing;
+> the WGS/WES CNV split is correct; and sex-check returns the right karyotype (WES `XX`, WGS
+> `XY`). Note: mosdepth reports a `*_region=0` row for contigs outside the `--by` BED, so
+> `ploidy_check.py` uses the whole-contig mean when a contig has no on-target region — without
+> this, WGS males were mis-called `X0?`.
+
 ---
 
 ## License and Third-party Tools
