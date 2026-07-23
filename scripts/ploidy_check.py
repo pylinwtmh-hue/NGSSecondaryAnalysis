@@ -39,7 +39,9 @@ scripts/ploidy_check.py
   （aneuploidy 判定用 NDC 偏離 1.0；性染色體非整倍體另由核型判定 XXY?/X0? 反映。）
 
 mosdepth summary 欄位：chrom length bases mean min max。每 contig 優先取 *_region
-（on-target）mean，否則整條 mean（WES off-target 稀釋，故優先 region；WGS 兩者接近）。
+（on-target）mean 且該值 >0，否則回退整條 mean。WES 用捕獲 BED，chrX 有 region → 用 region；
+WGS 用 autosome BED，chrX/chrY/chrM 的 *_region=0 代表「無區間」而非深度 0 → 回退 whole
+（否則男生性染色體會被誤判成 X0?/MISMATCH）。輸出只列主要 contig（chr1-22,X,Y,M）。
 相依：只用 Python 標準庫。
 """
 
@@ -86,7 +88,12 @@ def parse_mosdepth_summary(path):
                     length[name] = 0
     means = {}
     for c in set(list(whole) + list(region)):
-        means[c] = region[c] if c in region else whole.get(c)
+        # 優先取 on-target 的 *_region mean；但 mosdepth 會對「不在 --by BED 裡的 contig」
+        # 也吐一行 *_region=0（例如 WGS 用 autosome BED 時的 chrX/chrY/chrM），那代表「此
+        # contig 沒有區間」而非「深度 0」。若照抄 0 會把性染色體判成單套缺失（男生→X0?）。
+        # 因此 *_region 僅在 >0 時採用，否則回退整條 contig 的 whole mean。
+        r = region.get(c)
+        means[c] = r if (r is not None and r > 0) else whole.get(c, r)
     return means, length
 
 
@@ -206,8 +213,11 @@ def _fmt(x):
 # 輸出
 # ─────────────────────────────────────────────────────────────
 def _ordered_chroms(keys):
+    # 只輸出主要 contig（chr1-22, X, Y, M）。alt/decoy/unplaced 對 sex/ploidy 判斷無意義、
+    # 只是雜訊，一律不列（也與 DRAGEN ploidy.vcf 只含主要 contig 對齊）。analyze() 的
+    # baseline / 核型 / aneuploidy 本就只用主要 contig，這裡純粹是「輸出過濾」，不影響判定。
     order = AUTOSOMES + ["chrX", "chrY", "chrM"]
-    return [c for c in order if c in keys] + sorted(c for c in keys if c not in order)
+    return [c for c in order if c in keys]
 
 
 def write_vcf(path, sample, res, seq_type):

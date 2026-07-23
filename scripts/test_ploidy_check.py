@@ -121,6 +121,47 @@ def test_parse_prefers_region():
     print("PASS test_parse_prefers_region")
 
 
+def test_parse_region_zero_falls_back_to_whole():
+    # 回歸 VAL55(WGS) bug：mosdepth 對不在 --by autosome BED 的 chrX/chrY/chrM 吐 *_region=0，
+    # 必須回退到 whole mean（15.58 等），不能照抄 0，否則男生被判 X0?/MISMATCH。
+    txt = ("chrom\tlength\tbases\tmean\tmin\tmax\n"
+           "chr1\t248956422\t7185997134\t28.86\t0\t32361\n"
+           "chr1_region\t248956422\t7185997134\t28.86\t0\t32361\n"
+           "chrX\t156040895\t2431044962\t15.58\t0\t1915\n"
+           "chrX_region\t0\t0\t0.00\t0\t0\n"
+           "chrY\t57227415\t637166600\t11.13\t0\t12928\n"
+           "chrY_region\t0\t0\t0.00\t0\t0\n"
+           "chrM\t16569\t42205108\t2547.23\t56\t3777\n"
+           "chrM_region\t0\t0\t0.00\t0\t0\n"
+           "total\t0\t0\t0\t0\t0\n")
+    d = tempfile.mkdtemp(); p = os.path.join(d, "s.summary.txt")
+    open(p, "w").write(txt)
+    means, _ = P.parse_mosdepth_summary(p)
+    assert _approx(means["chrX"], 15.58) and _approx(means["chrY"], 11.13), means
+    assert _approx(means["chrM"], 2547.23), means
+    # 全鏈：declared male 應推得 XY / sex_check 過（先前是 X0?/MISMATCH）
+    m = _auto(28.86); m["chrX"] = 15.58; m["chrY"] = 11.13; m["chrM"] = 2547.23
+    res = P.analyze(m, {}, "male", "WGS")
+    assert res["estimated_karyotype"] == "XY", res["estimated_karyotype"]
+    assert not any("SEX MISMATCH" in w for w in res["warnings"]), res["warnings"]
+    print("PASS test_parse_region_zero_falls_back_to_whole -> chrX/Y/M 回退 whole, XY")
+
+
+def test_output_primary_contigs_only():
+    # 輸出只列主要 contig：alt/decoy/unplaced 一律不進 VCF / QC。
+    m = _auto(30.0); m["chrX"] = 15.0; m["chrY"] = 11.0; m["chrM"] = 2000.0
+    m["chr1_KI270706v1_random"] = 8.0; m["chrUn_GL000195v1"] = 5.0; m["HLA-A*01:01"] = 40.0
+    res = P.analyze(m, {}, "male", "WGS")
+    d = tempfile.mkdtemp(); vcf = os.path.join(d, "s.ploidy.vcf")
+    P.write_vcf(vcf, "S1", res, "WGS")
+    body = [ln for ln in open(vcf).read().splitlines() if ln and not ln.startswith("#")]
+    contigs = {ln.split("\t")[0] for ln in body}
+    assert contigs <= set(P.AUTOSOMES + ["chrX", "chrY", "chrM"]), contigs
+    assert "chrX" in contigs and "chrM" in contigs
+    assert not any("_random" in c or c.startswith(("chrUn", "HLA-")) for c in contigs), contigs
+    print("PASS test_output_primary_contigs_only -> alt/decoy dropped")
+
+
 if __name__ == "__main__":
     test_normalize_declared_sex()
     test_male_ndc_normalized_ratio_raw()
@@ -131,4 +172,6 @@ if __name__ == "__main__":
     test_normal_no_false_aneuploidy()
     test_header_keys_match_dragen()
     test_parse_prefers_region()
+    test_parse_region_zero_falls_back_to_whole()
+    test_output_primary_contigs_only()
     print("\nALL TESTS PASSED")
