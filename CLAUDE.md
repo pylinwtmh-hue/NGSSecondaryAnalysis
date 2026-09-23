@@ -168,6 +168,10 @@ kept it. VAL55: all 28,050 `FILTER=RefCall` records left in `ensemble.fixed` car
 `test_haploid_nocall_passthrough`. stderr now ends with `nocall_passthrough=` (≈ RefCall count
 for DV, 0 for HC). `COMBINE_PHASED` stages the script as an input, so `-resume` re-runs from
 there. Check after a run: `bcftools view -H -f RefCall <id>.ensemble.fixed.vcf.gz | wc -l` → 0.
+**Verified on the VAL55 re-run:** RefCall 28,050 → 0; `nocall_passthrough` DV 865,130 / HC 0;
+split variants 23,023 → 820; tertiary DV+HC / DV only / HC only = 89.9% / 2.6% / 7.4%. The 820
+left are probably the two callers writing one variant differently (e.g. combine's leading base vs
+a minimal record) — the ensemble merges without `norm -f`, so they only line up in tertiary.
 
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 

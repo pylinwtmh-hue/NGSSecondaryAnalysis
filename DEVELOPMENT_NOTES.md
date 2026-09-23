@@ -1696,6 +1696,12 @@ chr1 602156 CA>CG,GG   RefCall;VQSRTrancheSNP99.90to100.00 COMBINED=2
 
 **原因與修法**：見上方第 43 條。
 
+**修正後重跑（`-resume`，從 `COMBINE_PHASED` 往後）**：ensemble 的 RefCall 28,050 → **0**；
+combine stderr `nocall_passthrough` DV **865,130**（≈ DV 否決的候選數，約佔 DV 紀錄 16%）、HC **0**；
+三級「拆兩列」23,023 → **820**；ADD_CALLERS_TAG DV+HC 89.9% / DV only 2.6% / HC only 7.4%。
+剩下 820 個推測是兩個 caller 對同一變異寫法不同（例如一邊 combine 帶前導鹼基、另一邊是最小表示），
+ensemble merge 前的 `norm -m -any` 沒有 `-f`（不正規化），三級 `norm -f` 後才對齊；待看實例確認。
+
 **另外兩件同時確認的事**：
 - **SUZ12 在這次重跑已不是當初出錯的情境**：同一個缺失成分 DP/AD/VAF 完全相同（24 / 10,14 / 0.583），
   但 DV 的 GQ 9→15、PL `0,8,34`→`15,0,24`，由 RefCall 翻成 het；HC 的 anchor 也由 DP 5 變 DP 25。
