@@ -103,7 +103,7 @@ apptainer build multiqc_1.33.sif \
 apptainer build /data/pylin1991/nf-containers/whatshap_2.8.sif \
   docker://quay.io/biocontainers/whatshap:2.8--py39h2de1943_0
 # 用途：對 NCKUH ensemble VCF 做 read-backed phasing 補 PS，供三級正確處理 compound
-#       （相鄰 cis del+ins，如 SUZ12 delAAAinsTT）。以 --run_phasing true 開啟（預設關），
+#       （相鄰 cis del+ins，如 SUZ12 delAAAinsTT）。由 --run_phasing 控制（DGX 驗證後已改為預設開；--run_phasing false 可關），
 #       僅 NCKUH 路徑需要（DRAGEN VCF 自帶 PS）。此容器只含 whatshap；切檔/合併用既有
 #       bcftools 容器，phase 用此容器，依 contig 平行（見 modules/phasing.nf）。
 
@@ -1650,6 +1650,10 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     （bcftools 容器是 busybox 基底，沒有 Python）；`set -o pipefail` 的 subshell 裡跑，失敗會中止。
     測試：`test_haploid_het.py`（mawk 與 busybox awk 都過；`AWK="busybox awk"` 可切換）。
     重跑二級 `-resume` 會從 `COMBINE_PHASED`（第 44 條）與 `BCFTOOLS_ENSEMBLE`（新 input）往後重跑。
+    **VAL55 重跑確認**：`chrX_het_to_alt_DV=2243 chrX_het_to_alt_HC=2699 chrY_het_to_missing_DV=2395
+    chrY_het_to_missing_HC=10066`；帶標記的 4,326 筆全在 chrX；三級 NONE 10,159 筆全在 chrY；第 44 條的
+    「拆兩列」820 → 2（剩下是重複序列 indel 左對齊差異；要消除需在 merge 前 `norm -f`，未做）。
+    **chrM 不處理**（實驗室決定）：ensemble 裡 chrM 的 het 仍會被截斷，粒線體以 `07_mitochondria` 為準。
 
 ---
 

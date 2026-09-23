@@ -640,6 +640,7 @@ This pipeline is released under the [GNU General Public License v3](LICENSE) (GP
 | [SAMtools](https://github.com/samtools/samtools) | 1.23.1 | MIT |
 | [BCFtools](https://github.com/samtools/bcftools) | 1.23.1 | MIT |
 | [Mosdepth](https://github.com/brentp/mosdepth) | 0.3.13 | MIT |
+| [WhatsHap](https://github.com/whatshap/whatshap) | 2.8 | MIT ✅ (phasing, `--run_phasing`, on by default) |
 | [Delly](https://github.com/dellytools/delly) | 1.7.3 | BSD ✅ |
 | [CNVkit](https://github.com/etal/cnvkit) | 0.9.12 | Apache 2.0 |
 | [GangSTR](https://github.com/gymreklab/GangSTR) | 2.5.0 | GPL v3 ✅ |

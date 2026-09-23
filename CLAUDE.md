@@ -101,7 +101,9 @@ take effect on the **next case run** and do NOT need a PON rebuild.
 
 **Goal:** merge caller-split adjacent/overlapping *cis* variants (e.g. SUZ12
 `c.2168_2170delAAAinsTT`) into one canonical MNV so tertiary VEP reports the correct
-combined `p.` (`p.Glu723_Thr724delinsAla`), matching outside labs. Default **off**.
+combined `p.` (`p.Glu723_Thr724delinsAla`), matching outside labs. Default **on**
+(`params.run_phasing = true` since DGX validation; `--run_phasing false` skips it — the config
+comment still says "預設 OFF", which is stale).
 
 **NCKUH — per caller, BEFORE the ensemble merge.** `main.nf` runs `PHASE_COMBINE`
 (`modules/phasing.nf`) on each raw single-sample caller VCF (DV, HC): `whatshap phase`
@@ -195,7 +197,10 @@ chrY: het → `./.` (not reported); PAR, autosomes, chrM, female/unknown: untouc
 `AWK="busybox awk" python3 scripts/test_haploid_het.py`). The pipe runs in a `set -o pipefail`
 subshell so a failure is not swallowed by `bash -ue`. stderr: `[haploid_het] … chrX_het_to_alt_*
 chrY_het_to_missing_*`. Germline callers still miss low-level mosaics; this only rescues calls that
-were made as het.
+were made as het. Verified on VAL55: 4,326 tagged records, all on chrX; tertiary NONE 10,159,
+all on chrY; split DV/HC rows 820 → 2 (left-alignment differences of repeat indels — adding
+`norm -f` before the merge would remove them; not done). **chrM is deliberately untouched**
+(lab decision): its hets are still truncated by `+fixploidy`; mtDNA is read from `07_mitochondria`.
 
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 
