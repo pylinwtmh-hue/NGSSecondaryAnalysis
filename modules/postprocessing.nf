@@ -159,6 +159,9 @@ process BCFTOOLS_ENSEMBLE {
     #   RefCall 仍完整保留在已發布的 <id>.deepvariant.vcf.gz（BGZIP_VCF_DV），可供稽核；
     #   CNVkit 的 b-allele 輸入讀的也是那份原始 DV VCF，不受影響。
     #   HC 不需要同樣處理：HC 的 VCF 模式只輸出有 ALT 的位點。
+    #   這裡擋不到 combine_phased.py 合成的紀錄（它的 GT 是重建的、帶 ALT）。舊版 combine
+    #   會把被否決的較寬候選挑成 anchor，合成紀錄因此帶著 FILTER=RefCall 與它的 AD/VAF 留下來
+    #   （VAL55：28,050 筆）；已在 combine_phased.py 修正（沒有 ALT 的紀錄不參與叢集）。
     #   不用 pipe：本 pipeline 的 shell 是 bash -ue（沒有 pipefail），norm 若中途失敗，
     #   接在後面的 view 仍可能以 0 結束並寫出截斷的檔案。拆成兩步，各自被 -e 檢查。
     bcftools norm -m -any fx_dv.vcf.gz -O u -o norm_dv.bcf

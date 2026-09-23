@@ -12,6 +12,8 @@ Covers the cases discussed for the NCKUH compound-merging design:
   - hom+hom -> 1|1 MNV
   - overlapping opposite-hap -> 1|2 co-representation
   - isolated -> passthrough
+  - records with no ALT in the sample's GT (DeepVariant RefCall ./., 0/0, haploid 0/.)
+    never join a cluster: not an anchor, no padding, no bridging
 
 NOTE (known limitation, see module docstring): reconstruction of *overlapping*
 edits on the SAME haplotype (padded/complex caller splits) is not universally
@@ -224,6 +226,55 @@ def test_isolated_still_untouched():
     print("PASS test_isolated_still_untouched -> lone record passthrough verbatim")
 
 
+def test_nocall_wider_candidate_not_anchor():
+    # DeepVariant keeps candidates it REJECTED (FILTER=RefCall, GT ./.). A wider rejected
+    # deletion overlapping a real SNV call used to join the cluster and become the anchor:
+    # the SNV came out as CGTA>CGGA with the deletion's QUAL/FILTER/AD/VAF and a fake 0|1+PS,
+    # at the deletion's POS (so it no longer lined up with HC's call of the same SNV).
+    # Regression test (VAL55: 28,050 such RefCall-anchored records).
+    fetch = mkfetch({"chrT": (10, "CGTA")})
+    recs = [
+        "chrT\t10\t.\tCGTA\tC\t0.8\tRefCall\t.\tGT:AD:DP\t./.:20,3:23",   # rejected, widest
+        "chrT\t12\t.\tT\tG\t40.1\tPASS\t.\tGT:AD:DP\t0/1:11,12:23",       # real call
+    ]
+    out, st = _run_process(recs, fetch, max_gap=2)
+    assert st["clusters_merged"] == 0 and st["records_nocall"] == 1, st
+    assert all("COMBINED" not in ln for ln in out), out
+    assert sorted(out) == sorted(recs), out        # both records verbatim, SNV keeps its own AD
+    print("PASS test_nocall_wider_candidate_not_anchor -> rejected candidate passes through")
+
+
+def test_nocall_does_not_bridge():
+    # A rejected candidate spanning two real cis SNVs must not glue them into one MNV:
+    # the SNVs are 4 bp apart (> max_gap=2), so on their own they stay separate.
+    fetch = mkfetch({"chr1": (100, "CAGGTA")})
+    recs = [
+        "chr1\t100\t.\tC\tT\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:100",
+        "chr1\t100\t.\tCAGGTA\tC\t1.2\tRefCall\t.\tGT:AD:DP:PS\t0/0:17,2:19:.",
+        "chr1\t105\t.\tA\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:9,10:19:100",
+    ]
+    out, st = _run_process(recs, fetch, max_gap=2)
+    assert st["clusters_merged"] == 0 and st["records_nocall"] == 1, st
+    assert all("COMBINED" not in ln for ln in out), out
+    assert sorted(out) == sorted(recs), out
+    print("PASS test_nocall_does_not_bridge -> no MNV built across a rejected candidate")
+
+
+def test_haploid_nocall_passthrough():
+    # haploid no-calls ("0" / ".") never join a cluster either; the real hemizygous
+    # call next to them stays a lone, untouched record.
+    fetch = mkfetch({"chrX": (1000, "CAG")})
+    recs = [
+        "chrX\t1000\t.\tC\tT\t50\tPASS\t.\tGT:AD:DP\t1:0,8:8",
+        "chrX\t1001\t.\tA\tG\t3\tRefCall\t.\tGT:AD:DP\t0:7,1:8",
+        "chrX\t1002\t.\tG\tA\t2\tRefCall\t.\tGT:AD:DP\t.:6,2:8",
+    ]
+    out, st = _run_process(recs, fetch, max_gap=2)
+    assert st["clusters_merged"] == 0 and st["records_nocall"] == 2, st
+    assert sorted(out) == sorted(recs), out
+    print("PASS test_haploid_nocall_passthrough -> haploid 0 / . not clustered")
+
+
 if __name__ == "__main__":
     test_suz12_hc()
     test_cis_two_snv_gap()
@@ -240,4 +291,7 @@ if __name__ == "__main__":
     test_mixed_ploidy_passthrough()
     test_haploid_mito_passthrough()
     test_isolated_still_untouched()
+    test_nocall_wider_candidate_not_anchor()
+    test_nocall_does_not_bridge()
+    test_haploid_nocall_passthrough()
     print("\nALL TESTS PASSED")

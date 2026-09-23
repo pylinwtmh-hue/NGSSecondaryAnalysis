@@ -42,6 +42,8 @@ phased、同一個 PS、且非參考等位都落在同一條單體。trans（同
   * haploid（男性 non-PAR chrX/chrY；整叢皆單套）→ 只重建單一單體 → GT=1 的 hemizygous
     MNV（不帶 PS）；chrM 不走此路（多拷貝異質性，見下）
   * 孤立變異（叢集只含 1 顆）→ 原行輸出，完全不動
+  * 該 sample 的 GT 沒有 ALT（./.、0/0、單套 0 或 .；典型是 DeepVariant 否決的候選
+    FILTER=RefCall）→ **不參與叢集**，原行輸出（二級 BCFTOOLS_ENSEMBLE 之後會把 DV 的丟掉）
 
 重疊套用規則（處理如 SUZ12 的 GAAA>G 與 A>ATT 在同一單體重疊）：沿參考游標套用，
 遇到 POS < 游標（重疊已消耗的 ref）時，只補上該變異 ALT 中「尚未輸出」的尾段
@@ -67,6 +69,16 @@ c.2168_2170delAAAinsTT。
 
 ⚠️ 早期版本合成紀錄只輸出 GT:PS，會把 AD/DP/VAF 丟成 '.'（三級 DRAGEN AD 消失 bug、
    145k+ 筆受影響）。現改為「anchor 繼承 + 多等位/混ploidy/chrM 退回原封通過」，都保住深度。
+
+⚠️ 沒有 ALT 的紀錄曾經會參與叢集（2026-09 修正）。DeepVariant 的 VCF 保留它否決的候選
+   （FILTER=RefCall）；舊版讓它們照「足跡重疊必合」進叢集，又因 anchor 只挑「足跡最寬」、
+   不看有沒有被 call，於是被否決的較寬候選（常是缺失）蓋住真的 call（如 SNV）時：
+     - 合成紀錄沿用被否決候選的 QUAL / FILTER=RefCall / GQ / DP / AD / VAF / PL；
+     - 從被否決候選的 POS 起、補上參考鹼基重寫 → 與 HC 同一變異的 POS 對不上，merge 合不起來，
+       三級 norm 後又變成同一個變異 → 報告裡拆成 CALLERS=DV（深度是被否決候選的）+ CALLERS=HC 兩列；
+     - 未 phase 的 het 也被寫成 0|1 並給假的 PS；被否決候選還會把兩顆不相干的 call 串成同一叢。
+   合成紀錄的 GT 有 ALT，所以二級 BCFTOOLS_ENSEMBLE 的 DV `GT="alt"` 過濾擋不掉。實例 VAL55：ensemble 有
+   28,050 筆 FILTER=RefCall 全部帶 COMBINED；三級 23,023 個變異被拆成 DV 一列 + HC 一列。
 """
 
 import argparse
@@ -363,8 +375,9 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             sample_col: int = 0) -> dict:
     """主流程；回傳統計。fetch 可注入（測試用）。"""
     stats = {"clusters_merged": 0, "clusters_haploid": 0, "clusters_fallback": 0,
-             "records_in": 0, "records_out": 0}
+             "records_in": 0, "records_out": 0, "records_nocall": 0}
     header, chrom_vars, order_chrom = [], {}, []
+    chrom_nocall = {}                  # chrom -> [(pos, line)]：沒有 ALT、不參與叢集的原行
     fmt_extra = ['##INFO=<ID=COMBINED,Number=1,Type=Integer,'
                  'Description="Number of source records combined into this MNV '
                  'by combine_phased.py">',
@@ -376,7 +389,7 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             vs = chrom_vars[chrom]
             clusters = cluster_vars(vs, max_gap)
             is_mito = chrom in _MITO_CONTIGS
-            recs = []
+            recs = list(chrom_nocall.get(chrom, []))   # 沒有 ALT 的紀錄：原行輸出
             for cl in clusters:
                 if len(cl) == 1:                       # 孤立顆 → 原行輸出，完全不動
                     recs.append((cl[0].pos, cl[0].line))
@@ -427,13 +440,20 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             fmt_keys = f[8].split(":") if len(f) > 8 else []
             sample_vals = f[9 + sample_col].split(":") if len(f) > 9 + sample_col else []
             alleles, phased, ps = parse_gt(fmt_keys, sample_vals)
+            if chrom not in chrom_vars:
+                chrom_vars[chrom] = []
+                order_chrom.append(chrom)
+            # 這個 sample 沒有 ALT（./.、0/0、單套 0 或 .，如 DV 的 RefCall）→ 不參與叢集，
+            # 原行輸出。否則被否決的候選會當 anchor（FORMAT/QUAL/FILTER 被換成它的）、
+            # 把合成紀錄的 POS/REF 撐寬、或把兩顆不相干的 call 串成同一叢（見檔頭 ⚠️）。
+            if not any(a > 0 for a in alleles):
+                chrom_nocall.setdefault(chrom, []).append((pos, line))
+                stats["records_nocall"] += 1
+                continue
             # 最小化後再參與叢集/重建（移除 padding 假性重疊）；passthrough 仍用原始 line。
             tpos, tref, talts = trim_alleles(pos, ref, alt.split(","))
             v = Var(chrom, tpos, tref, talts, line,
                     alleles=alleles, phased=phased, ps=ps)
-            if chrom not in chrom_vars:
-                chrom_vars[chrom] = []
-                order_chrom.append(chrom)
             chrom_vars[chrom].append(v)
         flush(w)
     return stats
@@ -453,9 +473,9 @@ def main():
     st = process(a.inp, a.out, fa.fetch, a.max_gap, a.sample_index)
     sys.stderr.write(
         "[combine_phased] in=%d out=%d merged_clusters=%d (haploid=%d) "
-        "passthrough_clusters=%d\n"
+        "passthrough_clusters=%d nocall_passthrough=%d\n"
         % (st["records_in"], st["records_out"], st["clusters_merged"],
-           st["clusters_haploid"], st["clusters_fallback"]))
+           st["clusters_haploid"], st["clusters_fallback"], st["records_nocall"]))
 
 
 if __name__ == "__main__":

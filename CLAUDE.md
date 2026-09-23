@@ -151,6 +151,24 @@ uniformly diploid, so the haploid path is in practice DRAGEN-only.)
 > `.` — this silently killed depth on 145k+ phased records (DRAGEN tertiary "AD 消失" bug,
 > VAL-58 `chr17:80260571` / confirmed on VAL-10). Fixed by anchor inheritance + passthrough.
 
+### ⚠️ Records with no ALT never join a cluster (2026-09)
+
+`process()` writes records whose sample GT has no ALT allele (`./.`, `0/0`, haploid `0`/`.` —
+typically DeepVariant's rejected candidates, `FILTER=RefCall`) straight through; they are
+not clustered. Before this, "overlap always merges" + "anchor = widest biallelic record"
+ignored call status, so a wider rejected candidate (usually a deletion) covering a real call
+(e.g. an SNV) became the anchor: the combined record carried the rejected candidate's
+`QUAL`/`FILTER=RefCall`/`GQ`/`DP`/`AD`/`VAF`/`PL`, was re-anchored at its `POS` (so it no longer
+lined up with HC's call and `merge` could not join them — tertiary `norm` then produced the same
+variant twice, `CALLERS=DV` with the wrong depth + `CALLERS=HC`), got a fake `0|1`+`PS`, and could
+bridge two unrelated calls into one MNV. Its GT has an ALT, so the ensemble's DV `GT="alt"` filter
+kept it. VAL55: all 28,050 `FILTER=RefCall` records left in `ensemble.fixed` carried `COMBINED`;
+23,023 variants were split into a DV row + an HC row in the tertiary report. Tests:
+`test_nocall_wider_candidate_not_anchor`, `test_nocall_does_not_bridge`,
+`test_haploid_nocall_passthrough`. stderr now ends with `nocall_passthrough=` (≈ RefCall count
+for DV, 0 for HC). `COMBINE_PHASED` stages the script as an input, so `-resume` re-runs from
+there. Check after a run: `bcftools view -H -f RefCall <id>.ensemble.fixed.vcf.gz | wc -l` → 0.
+
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 
 `whatshap` re-declares **DeepVariant's** `AD` header as `Number=.` in the phased VCF (HC
@@ -191,7 +209,7 @@ sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 
 **Validation status (2026-07):** secondary confirmed (VAL55 SUZ12 → `GAAA>GTT`; NA12878
 `chr1:111241360` AD well-formed; preflight passes). Combined-record depth-preservation fix
-confirmed by unit+integration tests (`test_combine_phased.py`, 13 cases) and a CLI smoke run
+confirmed by unit+integration tests (`test_combine_phased.py`, now 18 cases) and a CLI smoke run
 (SUZ12 compound keeps `AD=30,12`; reporter's `1/2 AD=0,28,20` passes through intact). Pending:
 tertiary NCKUH end-to-end `-resume` (`ADD_CALLERS_TAG`); a real DRAGEN sample re-run to confirm
 `AD_DRAGEN` now populates; broader multi-sample validation before clinical use.

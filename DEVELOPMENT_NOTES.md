@@ -1622,6 +1622,16 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       （15 例：合成保留 AD/DP/AF、`1|2` 退回、haploid 合成 hemizygous、混 ploidy 退回、chrM 退回、孤立逐字通過）。
     - **NCKUH combine 跑在 `+fixploidy` 之前 = 一律 diploid**，故 haploid 路實務上只在三級 DRAGEN 觸發；男性性染色體
       compound 在二級是「diploid 合 → 之後 fixploidy 轉 haploid」，本來就有處理,三級這條是補上它原本缺的。
+43. **`combine_phased.py` 讓「沒有 ALT」的紀錄參與叢集 → DV 否決的候選被挑成 anchor（2026-09）**：
+    叢集規則「足跡重疊必合」與 anchor「足跡最寬的 biallelic」都不看 GT；DeepVariant 否決的較寬候選
+    （`FILTER=RefCall`、`./.`，常是缺失）蓋住真的 call（如 SNV）時，合成紀錄帶著被否決候選的
+    `QUAL`/`FILTER=RefCall`/`GQ`/`DP`/`AD`/`VAF`/`PL`，POS 被撐到候選的起點（和 HC 對不上 → merge 合不起來 →
+    三級 norm 後同一變異拆成 CALLERS=DV + CALLERS=HC 兩列），未 phase 的 het 被寫成 `0|1`＋假 PS，
+    還可能把兩顆不相干的 call 串成一個 MNV。合成紀錄 GT 有 ALT，ensemble 的 DV `GT="alt"` 擋不掉。
+    解法：`process()` 讀檔時 GT 沒有 ALT（`./.`、`0/0`、單套 `0`/`.`）的紀錄**不進叢集、原行輸出**。
+    stderr 行尾加 `nocall_passthrough=`（DV ≈ RefCall 數，HC 應為 0）。回歸測試：`test_combine_phased.py`
+    18 例（新增 `test_nocall_wider_candidate_not_anchor`、`test_nocall_does_not_bridge`、
+    `test_haploid_nocall_passthrough`；三個在舊版都會失敗）。三級同一支（md5 一致）。實例見下方踩雷記錄。
 
 ---
 
@@ -1666,6 +1676,38 @@ chr17 31998953 A T RefCall   DV ./.（AD 10,15）  HC ./.
 
 **影響**：`ensemble.fixed` 紀錄數下降（不再含 DV RefCall），上面 Variant Count 已註明。
 RefCall 仍保留在已發布的 `<id>.deepvariant.vcf.gz`；CNVkit 的 b-allele 讀那份，不受影響。
+
+### ⚠️ VAL55 重跑：ensemble 仍有 28,050 筆 RefCall → combine_phased 的 anchor bug（2026-09）
+
+**症狀**：加上 DV `GT="alt"` 過濾後重跑 VAL55（WGS，男性），`ensemble.fixed` 仍有 **28,050** 筆
+`FILTER=RefCall`（header 確認 `GT="alt"` 那一步有跑）。**全部帶 `INFO/COMBINED`** → 都是 combine_phased 合成的。
+
+**實際紀錄（節錄）**：
+
+```
+chr1 744865 CG>CA  2.8 RefCall COMBINED=2   DV 1|1 GQ 3 DP 12 AD 6,6 VAF 0.5 PL 0,2,4   HC ./.
+chr1 602156 CA>CG,GG   RefCall;VQSRTrancheSNP99.90to100.00 COMBINED=2
+     DV 1|1 GQ 6 AD 8,5,. VAF 0.38 PL 0,11,4        HC 2|0 AD 6,.,3
+```
+
+- 兩筆 DV 的 GT 都是 `1|1`（hom），但繼承來的 AD/VAF/PL 是 het 樣或「最可能是 REF」（`PL 0,…`）
+  → 這些數字屬於被否決的候選，不是這個 call。
+- 三級報告有 **23,023** 個變異被拆成「DV 一列 + HC 一列」（上限估計）。
+
+**原因與修法**：見上方第 43 條。
+
+**另外兩件同時確認的事**：
+- **SUZ12 在這次重跑已不是當初出錯的情境**：同一個缺失成分 DP/AD/VAF 完全相同（24 / 10,14 / 0.583），
+  但 DV 的 GQ 9→15、PL `0,8,34`→`15,0,24`，由 RefCall 翻成 het；HC 的 anchor 也由 DP 5 變 DP 25。
+  原因是兩次用的 **Parabricks 版本不同**。這個位點 DV 本來就在邊緣（GQ 都很低），版本一換就翻。
+  → 評鑑用的樣本應固定同一個 Parabricks 版本重跑，並把版本記進驗證紀錄。
+- **男性 chrX/chrY：phasing + `+fixploidy` 的交互作用（未修，待討論）**：
+  phasing 把 chrX/chrY 也送 whatshap（原始 VCF 一律 diploid），之後 `+fixploidy` 把男性 non-PAR 的 GT
+  **截成第一個 allele**（bcftools `plugins/fixploidy.c`：`0/1`、`0|1`→`0`，`1|0`→`1`）。沒開 phasing 時 het
+  一律變 REF；開了之後 phase 方向決定結果 → 一部分男性 chrX「het」（多半是誤比對）在報告裡顯示成
+  **hemizygous**。VAL55 實測（非合併、GT=1、有 PS，即原本 phased het 被截成 ALT）：DV 234、HC 403 筆；
+  被截成 REF 的（GT=0、有 PS）DV 292、HC 875 筆。可能的方向：男性 non-PAR 不送 whatshap，
+  或 fixploidy 前把單倍體區的 het 改成 missing。
 
 ## 未來進步方向（Roadmap；尚未實作，備忘）
 
