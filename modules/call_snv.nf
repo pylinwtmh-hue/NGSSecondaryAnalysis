@@ -142,9 +142,11 @@ workflow CALL_SNV {
         ch_ensemble_input = ch_dv_vcf.join(ch_filtered_hc_vcf, by: 0)
     }
 
-    // 性別感知倍體定義（單一真相來源；+fixploidy 用）
-    ch_sex_ploidy = file(params.sex_ploidy_file)
-    BCFTOOLS_ENSEMBLE(ch_ensemble_input, ch_sex_ploidy)
+    // 性別感知倍體定義（單一真相來源；+fixploidy 與 haploid_het.awk 共用）
+    ch_sex_ploidy   = file(params.sex_ploidy_file)
+    // 男性單倍體區 het 的前處理（chrX 非 PAR → ALT + HAPLOID_HET；chrY → missing）
+    ch_haploid_awk  = file("${projectDir}/scripts/haploid_het.awk")
+    BCFTOOLS_ENSEMBLE(ch_ensemble_input, ch_sex_ploidy, ch_haploid_awk)
 
     // 統計（→ MultiQC）
     BCFTOOLS_STATS(ch_dv_vcf)

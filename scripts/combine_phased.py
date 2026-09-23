@@ -48,11 +48,15 @@ phased、同一個 PS、且非參考等位都落在同一條單體。trans（同
 重疊套用規則（處理如 SUZ12 的 GAAA>G 與 A>ATT 在同一單體重疊）：沿參考游標套用，
 遇到 POS < 游標（重疊已消耗的 ref）時，只補上該變異 ALT 中「尚未輸出」的尾段
 （= 插入的部分）。SUZ12：hapB = "G"(delAAA) 之後補 "TT" → GAAA>GTT，符合
-c.2168_2170delAAAinsTT。
+c.2168_2170delAAAinsTT（輸出時再最小化成 31998951 AAA>TT，見下）。
 
 輸出與相依
 ----------
 * 輸入：單樣本 VCF(.gz)；輸出：未壓縮 VCF（交由 Nextflow bgzip+tabix）。
+* 合成出的 REF/ALT 在輸出前再**最小化**（trim_alleles：去掉 REF/ALT 共同的前後鹼基，至少各留 1 個，
+  所以純 indel 的前導鹼基會保留）。叢集範圍從第一個成分的 POS 起算，成分若是 indel 就帶著它的
+  前導鹼基；不修剪的話，DV、HC 對同一個 compound 拆成分的方式不同 → 前導鹼基長度不同 → POS 不同，
+  ensemble merge 合不起來（2026-09，VAL55：820 個變異在報告裡拆成 DV 一列 + HC 一列）。
 * 合成出的 biallelic 紀錄會「繼承一顆代表變異（anchor＝叢集內參考足跡最寬、ploidy 與合成
   結果一致的 biallelic 顆）」的整組 FORMAT：AD/DP/GQ/VAF/PL… 原封保留，當作該 compound 的
   讀取支持與等位分數（符合 bug report §4：保留原始 locus 的 VAF/AD，不用 2 元 AD 重算成誤導
@@ -410,6 +414,8 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
                     stats["clusters_fallback"] += 1
                     continue
                 pos, ref, alt_list, gt = res
+                # 輸出前最小化（見檔頭「輸出與相依」）：DV/HC 的前導鹼基長度不同時，才會對得上同一個 POS。
+                pos, ref, alt_list = trim_alleles(pos, ref, alt_list)
                 if len(gt) > 1:                        # diploid：phased GT + PS
                     gtstr = "|".join(str(g) for g in gt)
                     ps = next((v.ps for v in cl if v.ps), str(pos))

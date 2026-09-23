@@ -173,7 +173,29 @@ split variants 23,023 → 820; tertiary DV+HC / DV only / HC only = 89.9% / 2.6%
 left (5 checked) are combine outputs that keep leading bases shared by REF/ALT: the span starts at
 the first component's POS, which for an indel includes its anchor base, and the result is not
 minimised. DV and HC split one event differently, so the padding and POS differ and `merge`
-cannot join them; trimming both sides makes all 5 identical.
+cannot join them; trimming both sides makes all 5 identical. **Fixed:** `flush()` now runs
+`trim_alleles()` on the reconstructed REF/ALT before rendering (a pure deletion keeps its anchor
+base); SUZ12 is therefore written `31998951 AAA>TT`, not `31998950 GAAA>GTT`. Test:
+`test_merged_output_minimised`.
+
+### ⚠️ Male haploid-region hets are handled before `+fixploidy` (2026-09)
+
+`+fixploidy` keeps only the **first** allele when it makes a GT haploid (`plugins/fixploidy.c`):
+`0/1`, `0|1` → `0` (REF, vanishes from the report), `1|0` → `1` (hemizygous). With phasing the
+outcome depended on whatshap's arbitrary orientation (VAL55: chrX 2,607 + chrY 6,049 hets
+truncated to REF = the whole tertiary NONE count; hundreds more shown as hemizygous). A male het is
+usually mis-mapping, but can be 47,XXY or **somatic mosaicism** — how males are affected by
+X-linked dominant, male-lethal disorders (IKBKG, MECP2, CDKL5, PORCN, OFD1; PCDH19 affects mosaic
+males only) — so it must be neither hidden nor phase-dependent. For **male** samples only,
+`BCFTOOLS_ENSEMBLE` pipes the merged VCF through `scripts/haploid_het.awk` (staged input; reads the
+same ploidy file) before `+fixploidy`: chrX ploidy-1 regions: het `0/k` → `k/k` plus
+`INFO/HAPLOID_HET=<DV,HC>` (tertiary shows it as the `HAPLOID_HET` review column; AD/VAF untouched);
+chrY: het → `./.` (not reported); PAR, autosomes, chrM, female/unknown: untouched. POSIX awk only
+(the bcftools container is busybox-based; tested with mawk and busybox awk:
+`AWK="busybox awk" python3 scripts/test_haploid_het.py`). The pipe runs in a `set -o pipefail`
+subshell so a failure is not swallowed by `bash -ue`. stderr: `[haploid_het] … chrX_het_to_alt_*
+chrY_het_to_missing_*`. Germline callers still miss low-level mosaics; this only rescues calls that
+were made as het.
 
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 
@@ -215,7 +237,7 @@ sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 
 **Validation status (2026-07):** secondary confirmed (VAL55 SUZ12 → `GAAA>GTT`; NA12878
 `chr1:111241360` AD well-formed; preflight passes). Combined-record depth-preservation fix
-confirmed by unit+integration tests (`test_combine_phased.py`, now 18 cases) and a CLI smoke run
+confirmed by unit+integration tests (`test_combine_phased.py`, now 19 cases) and a CLI smoke run
 (SUZ12 compound keeps `AD=30,12`; reporter's `1/2 AD=0,28,20` passes through intact). Pending:
 tertiary NCKUH end-to-end `-resume` (`ADD_CALLERS_TAG`); a real DRAGEN sample re-run to confirm
 `AD_DRAGEN` now populates; broader multi-sample validation before clinical use.

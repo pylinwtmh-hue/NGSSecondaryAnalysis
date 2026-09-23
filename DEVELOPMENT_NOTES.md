@@ -1632,6 +1632,24 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     stderr 行尾加 `nocall_passthrough=`（DV ≈ RefCall 數，HC 應為 0）。回歸測試：`test_combine_phased.py`
     18 例（新增 `test_nocall_wider_candidate_not_anchor`、`test_nocall_does_not_bridge`、
     `test_haploid_nocall_passthrough`；三個在舊版都會失敗）。三級同一支（md5 一致）。實例見下方踩雷記錄。
+44. **`combine_phased.py` 合成結果沒有最小化 → 同一變異在 DV、HC 寫法不同、merge 合不起來（2026-09）**：
+    叢集範圍從第一個成分的 POS 起算，成分若是 indel 就帶著它的前導鹼基；DV、HC 拆成分的方式不同 →
+    前導鹼基長度不同（例：HC `chr2:130206583 ACTT>AACC` vs DV `130206584 CTT>ACC`）→ POS 不同 →
+    三級 norm 修剪後才一樣，報告裡拆成 DV 一列 + HC 一列（VAL55 修完第 43 條後還剩 820 個）。
+    解法：`flush()` 在輸出前對重建結果跑 `trim_alleles()`（右修剪→左修剪，至少各留 1 個鹼基，所以
+    純缺失 `GAAA>G` 的 anchor 會保留）。SUZ12 因此寫成 `31998951 AAA>TT`（原本 `31998950 GAAA>GTT`，
+    與三級 norm 後相同）。回歸測試 `test_merged_output_minimised`（舊版會失敗）；
+    `test_merged_keeps_format` 的預期改為最小化後的寫法。共 19 例。
+45. **男性單倍體區的 het 被 `+fixploidy` 依 allele 順序截斷（2026-09）**：`+fixploidy` 只留第一個 allele，
+    `0/1`、`0|1` → `0`（消失）、`1|0` → `1`（hemizygous）；開 phasing 後結果取決於 whatshap 任意定的方向。
+    男性 het 多半是比對假象，但也可能是 47,XXY 或體細胞嵌合（X-linked 顯性、男性通常致死疾病的男性病人；
+    PCDH19 只有嵌合男性發病），所以不能藏、也不能看方向。解法：`BCFTOOLS_ENSEMBLE` 對**男性**在
+    `+fixploidy` 前 pipe 過 `scripts/haploid_het.awk`（staged input；讀同一份 ploidy 檔）：
+    chrX ploidy=1 區間的 het `0/k` → `k/k` 並加 `INFO/HAPLOID_HET=<DV,HC>`（三級輸出 `HAPLOID_HET` 欄，
+    AD/VAF 不動）；chrY 的 het → `./.`（不進報告）；PAR、體染色體、chrM、女性不動。只用 POSIX awk
+    （bcftools 容器是 busybox 基底，沒有 Python）；`set -o pipefail` 的 subshell 裡跑，失敗會中止。
+    測試：`test_haploid_het.py`（mawk 與 busybox awk 都過；`AWK="busybox awk"` 可切換）。
+    重跑二級 `-resume` 會從 `COMBINE_PHASED`（第 44 條）與 `BCFTOOLS_ENSEMBLE`（新 input）往後重跑。
 
 ---
 
@@ -1699,14 +1717,14 @@ chr1 602156 CA>CG,GG   RefCall;VQSRTrancheSNP99.90to100.00 COMBINED=2
 **修正後重跑（`-resume`，從 `COMBINE_PHASED` 往後）**：ensemble 的 RefCall 28,050 → **0**；
 combine stderr `nocall_passthrough` DV **865,130**（≈ DV 否決的候選數，約佔 DV 紀錄 16%）、HC **0**；
 三級「拆兩列」23,023 → **820**；ADD_CALLERS_TAG DV+HC 89.9% / DV only 2.6% / HC only 7.4%。
-剩下 820 個：抽查 5 例都是兩個 caller 對同一變異的寫法不同：combine 合成時叢集範圍從第一個成分的 POS 開始，成分若是 indel 就帶著它的前導鹼基，而合成結果沒有再最小化；DV、HC 拆成分的方式不同 → 前導鹼基長度不同 → POS 不同，merge 合不起來，三級 norm 修剪後才一樣。兩邊各自最小化後 5 例完全相同。
+剩下 820 個：抽查 5 例都是兩個 caller 對同一變異的寫法不同：combine 合成時叢集範圍從第一個成分的 POS 開始，成分若是 indel 就帶著它的前導鹼基，而合成結果沒有再最小化；DV、HC 拆成分的方式不同 → 前導鹼基長度不同 → POS 不同，merge 合不起來，三級 norm 修剪後才一樣。兩邊各自最小化後 5 例完全相同。→ **已修**：合成結果輸出前先最小化（上方第 44 條）。
 
 **另外兩件同時確認的事**：
 - **SUZ12 在這次重跑已不是當初出錯的情境**：同一個缺失成分 DP/AD/VAF 完全相同（24 / 10,14 / 0.583），
   但 DV 的 GQ 9→15、PL `0,8,34`→`15,0,24`，由 RefCall 翻成 het；HC 的 anchor 也由 DP 5 變 DP 25。
   原因是兩次用的 **Parabricks 版本不同**。這個位點 DV 本來就在邊緣（GQ 都很低），版本一換就翻。
   → 評鑑用的樣本應固定同一個 Parabricks 版本重跑，並把版本記進驗證紀錄。
-- **男性 chrX/chrY：phasing + `+fixploidy` 的交互作用（未修，待討論）**：
+- **男性 chrX/chrY：phasing + `+fixploidy` 的交互作用（2026-09 已處理，見上方第 45 條）**：
   phasing 把 chrX/chrY 也送 whatshap（原始 VCF 一律 diploid），之後 `+fixploidy` 把男性 non-PAR 的 GT
   **截成第一個 allele**（bcftools `plugins/fixploidy.c`：`0/1`、`0|1`→`0`，`1|0`→`1`）。沒開 phasing 時 het
   一律變 REF；開了之後 phase 方向決定結果 → 一部分男性 chrX「het」（多半是誤比對）在報告裡顯示成
@@ -1715,8 +1733,8 @@ combine stderr `nocall_passthrough` DV **865,130**（≈ DV 否決的候選數�
   與 chrY（6,049）＝被截成 REF、報告裡看不到的男性 het。
   ⚠️ 不能一律藏掉：46,XY 男性遺傳來的變異（不論顯性或隱性）都是 hemizygous，不受影響；但男性出現的 het
   除了比對假象，也可能是 47,XXY 或**體細胞嵌合** —— X-linked dominant、男性通常致死的疾病（IKBKG、MECP2、
-  CDKL5、PORCN、OFD1…）存活的男性病人常是嵌合；PCDH19 則是 hemizygous 男性通常不發病、嵌合男性才發病。可能的方向：男性 non-PAR 不送 whatshap，
-  或 fixploidy 前把單倍體區的 het 改成 missing。
+  CDKL5、PORCN、OFD1…）存活的男性病人常是嵌合；PCDH19 則是 hemizygous 男性通常不發病、嵌合男性才發病。
+  → 決定（2026-09）：chrX 非 PAR 的 het 一律保留成 ALT 並加 `HAPLOID_HET` 標記給人工複核；chrY 的 het 不進報告。
 
 ## 未來進步方向（Roadmap；尚未實作，備忘）
 

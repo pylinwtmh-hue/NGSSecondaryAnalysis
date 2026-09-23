@@ -14,6 +14,8 @@ Covers the cases discussed for the NCKUH compound-merging design:
   - isolated -> passthrough
   - records with no ALT in the sample's GT (DeepVariant RefCall ./., 0/0, haploid 0/.)
     never join a cluster: not an anchor, no padding, no bridging
+  - combined REF/ALT are written minimised, so two callers' representations of one
+    event get the same POS (a pure deletion keeps its anchor base)
 
 NOTE (known limitation, see module docstring): reconstruction of *overlapping*
 edits on the SAME haplotype (padded/complex caller splits) is not universally
@@ -143,7 +145,8 @@ def test_merged_keeps_format():
     assert st["clusters_merged"] == 1 and st["clusters_fallback"] == 0
     assert len(out) == 1, out
     f = out[0].split("\t")
-    assert (f[3], f[4]) == ("GAAA", "GTT"), (f[3], f[4])
+    # reconstructed GAAA>GTT, written minimised (shared leading G trimmed)
+    assert (f[1], f[3], f[4]) == ("31998951", "AAA", "TT"), (f[1], f[3], f[4])
     assert f[5] == "60" and f[6] == "PASS", "QUAL/FILTER from anchor"
     assert "COMBINED=2" in f[7]
     d = dict(zip(f[8].split(":"), f[9].split(":")))
@@ -260,6 +263,36 @@ def test_nocall_does_not_bridge():
     print("PASS test_nocall_does_not_bridge -> no MNV built across a rejected candidate")
 
 
+def test_merged_output_minimised():
+    # One caller splits an event into an insertion (with its anchor base) + an SNV, the other
+    # reports it as one minimal record. Before: combine wrote the cluster span 100 AC>ATG, which
+    # never lined up with the other caller's 101 C>TG at merge (VAL55: 820 split variants).
+    fetch = mkfetch({"chrT": (100, "AC")})
+    split_caller = [
+        "chrT\t100\t.\tA\tAT\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:9,8:17:100",
+        "chrT\t101\t.\tC\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:9,8:17:100",
+    ]
+    minimal_caller = ["chrT\t101\t.\tC\tTG\t60\tPASS\t.\tGT:AD:DP\t0/1:10,9:19"]
+    out_a, st_a = _run_process(split_caller, fetch, max_gap=2)
+    out_b, _ = _run_process(minimal_caller, fetch, max_gap=2)
+    assert st_a["clusters_merged"] == 1 and len(out_a) == 1, out_a
+    a, b = out_a[0].split("\t"), out_b[0].split("\t")
+    assert (a[1], a[3], a[4]) == ("101", "C", "TG"), a[:5]
+    assert (a[1], a[3], a[4]) == (b[1], b[3], b[4]), (a[:5], b[:5])
+
+    # a pure-deletion result keeps its VCF anchor base (never trimmed to an empty allele)
+    fetch = mkfetch({"chr17": (950, "GAAA")})
+    dels = [
+        "chr17\t950\t.\tGA\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:950",
+        "chr17\t952\t.\tAA\tA\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:950",
+    ]
+    out, st = _run_process(dels, fetch, max_gap=2)
+    assert st["clusters_merged"] == 1 and len(out) == 1, out
+    f = out[0].split("\t")
+    assert (f[1], f[3], f[4]) == ("950", "GAA", "G"), f[:5]
+    print("PASS test_merged_output_minimised -> 100 AC>ATG written as 101 C>TG; deletion keeps anchor")
+
+
 def test_haploid_nocall_passthrough():
     # haploid no-calls ("0" / ".") never join a cluster either; the real hemizygous
     # call next to them stays a lone, untouched record.
@@ -294,4 +327,5 @@ if __name__ == "__main__":
     test_nocall_wider_candidate_not_anchor()
     test_nocall_does_not_bridge()
     test_haploid_nocall_passthrough()
+    test_merged_output_minimised()
     print("\nALL TESTS PASSED")
