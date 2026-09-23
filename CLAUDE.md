@@ -163,8 +163,29 @@ FMT/AD`). So `BCFTOOLS_ENSEMBLE`, per caller before merging: force `AD`→`Numbe
 `Number=A/R/G` field is still malformed (protects against, e.g., `VAF` too). Never use
 `norm --force` (drops the tag → silently loses AD/VAF).
 
+### ⚠️ DV non-calls are dropped before the merge (2026-09)
+
+After the DV arm's `norm -m -any`, `BCFTOOLS_ENSEMBLE` keeps only `GT="alt"` records
+(two steps via `norm_dv.bcf`, not a pipe — the shell is `bash -ue` without `pipefail`).
+DeepVariant's VCF keeps candidates it **rejected** (`FILTER=RefCall`, GT `./.`/`0/0`). If
+they reach `merge --merge all` and HC has a *different* allele at the same POS, the two are
+fused into one multiallelic record (ALT1 = DV's rejected candidate, ALT2 = HC's real call)
+whose FILTER becomes DV's `RefCall`; tertiary `norm` then splits the rejected allele back
+out as a record **neither caller called**. Real case — SUZ12 `chr17:31998950`: DV rejected
+all three delinsTT components; HC's combine produced the correct `GAAA>GTT 0|1`; the merge
+produced `GAAA GAA,GTT`, and the report gained a bogus `c.2170del` while the true delinsTT
+carried DV's meaningless `AD 10,0`. Filter *after* `norm` so a DV `0/2` splits into `0/0`
+(dropped) + `0/1` (kept). Measured `GT="alt"`: keeps `0/1 0|1 1/1 1|1 1/0`; drops `./. 0/0
+0|0 ./0` and half-missing `./1 1/.` — matching tertiary `add_callers_tag.is_called()`. DV's
+RefCalls stay in the published raw `<id>.deepvariant.vcf.gz` (auditable; CNVkit reads that
+file, not the ensemble). HC needs no equivalent (VCF mode emits ALT sites only). Tertiary
+separately fixed `determine_callers()` (no-call → `NONE`, was `HC`) and `get_ad()` (keeps
+missing as `.`, was `0`) — the ensemble change and those fixes are independent safeguards.
+
 **Side effects to know:** `ensemble.fixed` is now **biallelic-split** at former
-multiallelic sites (benign — tertiary's `norm -m -any` becomes a no-op). Combining
+multiallelic sites (benign — tertiary's `norm -m -any` becomes a no-op), except where the
+two callers carry different alleles at one POS (still fused by `--merge all`, still split in
+tertiary). It also **no longer contains DV RefCall records**, so its record count drops. Combining
 **lowers** the variant count (compound multi-records → one MNV); validate by specific
 sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 

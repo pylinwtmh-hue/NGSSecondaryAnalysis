@@ -585,6 +585,16 @@ $BCFTOOLS view ${OUTDIR}/07_mitochondria/${SAMPLE}.mito.vcf.gz | grep -v "^#" \
 
 > ⚠️ 若 WGS 資料來自 SRR622457，DeepVariant SNPs 可能高達 930 萬，Ti/Tv 可能偏低至 1.73，此為該資料品質問題，非 pipeline 錯誤。建議改用 ERR194147 進行 WGS 驗證。
 
+> ⚠️ **DeepVariant 的數字包含 RefCall**：`bcftools stats` 不看 GT，DV 否決的候選
+> （`FILTER=RefCall`、GT `./.` / `0/0`）也算在 SNPs / indels 裡。要看 DV 真正 call 了幾個：
+> ```bash
+> $BCFTOOLS view -H -i 'GT="alt"' ${OUTDIR}/04_snv_indel/${SAMPLE}.deepvariant.vcf.gz | wc -l
+> $BCFTOOLS view -H -f RefCall     ${OUTDIR}/04_snv_indel/${SAMPLE}.deepvariant.vcf.gz | wc -l
+> ```
+> **2026-09 起 `ensemble.fixed` 不再包含 DV 的 RefCall**（`BCFTOOLS_ENSEMBLE` 在 merge 前
+> 只留 `GT="alt"`，見「踩雷記錄 → SUZ12」），所以 Ensemble 的紀錄數會比之前少 ——
+> **這是預期的，不是 regression**。
+
 ### Alignment QC
 
 ```bash
@@ -1157,6 +1167,16 @@ $BCFTOOLS view ${OUTDIR}/07_mitochondria/${SAMPLE}.mito.vcf.gz | grep -v "^#" \
 
 > ⚠️ 若 WGS 資料來自 SRR622457，DeepVariant SNPs 可能高達 930 萬，Ti/Tv 可能偏低至 1.73，此為該資料品質問題，非 pipeline 錯誤。建議改用 ERR194147 進行 WGS 驗證。
 
+> ⚠️ **DeepVariant 的數字包含 RefCall**：`bcftools stats` 不看 GT，DV 否決的候選
+> （`FILTER=RefCall`、GT `./.` / `0/0`）也算在 SNPs / indels 裡。要看 DV 真正 call 了幾個：
+> ```bash
+> $BCFTOOLS view -H -i 'GT="alt"' ${OUTDIR}/04_snv_indel/${SAMPLE}.deepvariant.vcf.gz | wc -l
+> $BCFTOOLS view -H -f RefCall     ${OUTDIR}/04_snv_indel/${SAMPLE}.deepvariant.vcf.gz | wc -l
+> ```
+> **2026-09 起 `ensemble.fixed` 不再包含 DV 的 RefCall**（`BCFTOOLS_ENSEMBLE` 在 merge 前
+> 只留 `GT="alt"`，見「踩雷記錄 → SUZ12」），所以 Ensemble 的紀錄數會比之前少 ——
+> **這是預期的，不是 regression**。
+
 ### Alignment QC
 
 ```bash
@@ -1604,6 +1624,48 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       compound 在二級是「diploid 合 → 之後 fixploidy 轉 haploid」，本來就有處理,三級這條是補上它原本缺的。
 
 ---
+
+## 踩雷記錄
+
+### ⚠️ SUZ12：ensemble 把 DV 否決的候選併進 HC 的 call（2026-09）
+
+**症狀**：與 DRAGEN 比對 SUZ12 `c.2168_2170delinsTT` 時，三級報告多出一個錯誤的
+`c.2170del`（`chr17:31998950 GA>G`，AD 10,14、VAF 0.583），正確的 delinsTT 反而顯示
+`AD 10,0 / VAF 0`。DRAGEN 只有正確的那一個。
+
+**ensemble 在這個位點實際長這樣**：
+
+```
+chr17 31998950 GAAA GAA,GTT RefCall COMBINED=2
+  DV: ./.  DP 24  AD 10,14,.  VAF 0.583,.     ← ALT1 只有 DV 有資料（DV 否決的候選）
+  HC: 0|2  DP 5   AD 3,.,2    PS 31998950     ← ALT2 只有 HC 有資料（HC 合成的 delinsTT）
+chr17 31998952 A T RefCall   DV ./.（AD 11,14）  HC ./.
+chr17 31998953 A T RefCall   DV ./.（AD 10,15）  HC ./.
+```
+
+- DV 看到 delinsTT 的三個片段（950 缺一個 A、952 A>T、953 A>T），**三個都判 RefCall**
+- HC 的 combine_phased **正確**合成 `GAAA>GTT`（`0|1`、`COMBINED=2`）—— **phasing 沒有問題**
+- `merge --merge all` 把同一 POS 的 DV `GAAA>GAA` 與 HC `GAAA>GTT` 併成一筆多等位，
+  FILTER 取了 DV 的 `RefCall`
+- 三級 norm 拆開後，DV 否決的 allele 變成「兩邊都沒 call」的獨立紀錄，又碰上三級
+  `determine_callers()` 把「兩邊都沒 call」標成 HC 的 bug → 四筆全進 ACMG 表
+
+**二級的修正**：`BCFTOOLS_ENSEMBLE` 的 DV arm 在 `norm -m -any` 之後加
+`bcftools view -i 'GT="alt"'`，DV 否決的候選根本不進 merge。三級另外修了
+`determine_callers()`（→ `NONE`）與 `get_ad()`（缺值保留 `.`），兩邊是彼此獨立的防線。
+詳細推導、測試與重現方法見三級的 `DEVELOPMENT_NOTES.md`「SUZ12 幽靈變異」。
+
+**實作細節（都實測過）**：
+- **先 norm 再 filter**：DV 的多等位 `0/2` 拆開後是 `0/0`（丟）+ `0/1`（留）。
+- **不用 pipe**：shell 是 `bash -ue`、沒有 `pipefail`，`norm | view` 在 norm 中途失敗時
+  可能以 0 結束並寫出截斷檔 → 拆成 `norm -o norm_dv.bcf` 與 `view` 兩步。
+  （`modules/cnv_sv.nf` 的 `bcftools view -f PASS | bcftools sort` 也有同樣的暴露，本次未動。）
+- **`GT="alt"`** 丟掉 `./. 0/0 0|0 ./0` 以及半缺失 `./1 1/.`，與三級 `is_called()` 一致。
+- **`--merge both`（預設）其實不會併這兩筆** —— delins 不是單純 indel，只有 `all` 會併。
+  本 pipeline 用 `all`；加上 DV 過濾後，這種「否決候選併進真 call」已不會再發生。
+
+**影響**：`ensemble.fixed` 紀錄數下降（不再含 DV RefCall），上面 Variant Count 已註明。
+RefCall 仍保留在已發布的 `<id>.deepvariant.vcf.gz`；CNVkit 的 b-allele 讀那份，不受影響。
 
 ## 未來進步方向（Roadmap；尚未實作，備忘）
 

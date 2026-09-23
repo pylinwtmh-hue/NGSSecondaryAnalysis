@@ -140,7 +140,29 @@ process BCFTOOLS_ENSEMBLE {
     # 各自拆成 biallelic（AD 已是 Number=R，會被正確 re-size），再走 bcftools 標準的
     # biallelic→multiallelic 聯集路徑（Number=R/A/G 正確處理；某 caller 缺的 allele 補 '.'）。
     # phasing 開啟時，combine_phased.py 產生的 MNV / 1|2 記錄也在此一併拆開。
-    bcftools norm -m -any fx_dv.vcf.gz -O z -o temp_dv.vcf.gz
+    #
+    # ⚠️ DV arm 拆完後只留「DV 真的有 ALT call」的紀錄（-i 'GT="alt"'），再進 merge。
+    #   DeepVariant 的 VCF 會保留它考慮過但否決的候選（FILTER=RefCall，GT ./. 或 0/0）。
+    #   若讓它們進 merge --merge all，只要 HC 在同一 POS 有不同 allele，兩者就會被併成
+    #   一筆多等位紀錄 —— ALT1 是 DV 否決的候選、ALT2 是 HC 真正的 call —— 而且合併後的
+    #   FILTER 會變成 DV 的 RefCall。三級 norm 再拆開時，被否決的那個 allele 會變成一筆
+    #   「兩邊都沒 call」的獨立紀錄。
+    #   實例（SUZ12 chr17:31998950）：DV 把 delinsTT 的三個片段（GAAA>GAA、952 A>T、
+    #   953 A>T）全判 RefCall；HC 經 combine_phased 正確合成 GAAA>GTT（0|1）。merge 後
+    #   變成 GAAA  GAA,GTT、FILTER=RefCall，三級拆開後報告多出錯誤的 c.2170del，且正確的
+    #   delinsTT 帶著 DV 的 AD「10,0」（DV 從未評估過這個 allele）。
+    #   先 norm 再 filter 的順序是必要的：DV 的多等位 0/2 拆開後是 0/0（被否決的 ALT）+
+    #   0/1（真的 call），這樣才能只丟掉被否決的那個 allele。
+    #   GT="alt" 的實測語義（bcftools）：保留 0/1、0|1、1/1、1|1、1/0；丟掉 ./.、0/0、0|0、
+    #   ./0，以及半缺失的 ./1、1/. —— 與三級 add_callers_tag.is_called()（任一 allele 缺失
+    #   即視為沒 call）一致。DV 本身不產生半缺失 GT。
+    #   RefCall 仍完整保留在已發布的 <id>.deepvariant.vcf.gz（BGZIP_VCF_DV），可供稽核；
+    #   CNVkit 的 b-allele 輸入讀的也是那份原始 DV VCF，不受影響。
+    #   HC 不需要同樣處理：HC 的 VCF 模式只輸出有 ALT 的位點。
+    #   不用 pipe：本 pipeline 的 shell 是 bash -ue（沒有 pipefail），norm 若中途失敗，
+    #   接在後面的 view 仍可能以 0 結束並寫出截斷的檔案。拆成兩步，各自被 -e 檢查。
+    bcftools norm -m -any fx_dv.vcf.gz -O u -o norm_dv.bcf
+    bcftools view -i 'GT="alt"' norm_dv.bcf -O z -o temp_dv.vcf.gz
     bcftools index --tbi temp_dv.vcf.gz
     bcftools norm -m -any fx_hc.vcf.gz -O z -o temp_hc.vcf.gz
     bcftools index --tbi temp_hc.vcf.gz
@@ -180,7 +202,7 @@ process BCFTOOLS_ENSEMBLE {
     # -------------------------------------------------------------
     # 6. 清理所有暫存檔
     # -------------------------------------------------------------
-    rm -f rename_dv.txt rename_hc.txt rn_dv.vcf.gz* rn_hc.vcf.gz* hdr_dv.txt hdr_hc.txt fx_dv.vcf.gz* fx_hc.vcf.gz* temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt ${prefix}.ensemble.raw.vcf.gz*
+    rm -f rename_dv.txt rename_hc.txt rn_dv.vcf.gz* rn_hc.vcf.gz* hdr_dv.txt hdr_hc.txt fx_dv.vcf.gz* fx_hc.vcf.gz* norm_dv.bcf temp_dv.vcf.gz* temp_hc.vcf.gz* sample_sex.txt ${prefix}.ensemble.raw.vcf.gz*
     """
     // # -------------------------------------------------------------
     // # 方案 B：嚴格取交集 (Intersection) -> 產出 1 個 Sample 欄位的 VCF
