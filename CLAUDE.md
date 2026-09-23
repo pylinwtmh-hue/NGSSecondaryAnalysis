@@ -170,8 +170,10 @@ for DV, 0 for HC). `COMBINE_PHASED` stages the script as an input, so `-resume` 
 there. Check after a run: `bcftools view -H -f RefCall <id>.ensemble.fixed.vcf.gz | wc -l` → 0.
 **Verified on the VAL55 re-run:** RefCall 28,050 → 0; `nocall_passthrough` DV 865,130 / HC 0;
 split variants 23,023 → 820; tertiary DV+HC / DV only / HC only = 89.9% / 2.6% / 7.4%. The 820
-left are probably the two callers writing one variant differently (e.g. combine's leading base vs
-a minimal record) — the ensemble merges without `norm -f`, so they only line up in tertiary.
+left (5 checked) are combine outputs that keep leading bases shared by REF/ALT: the span starts at
+the first component's POS, which for an indel includes its anchor base, and the result is not
+minimised. DV and HC split one event differently, so the padding and POS differ and `merge`
+cannot join them; trimming both sides makes all 5 identical.
 
 ### ⚠️ Ensemble `FORMAT/AD` header reconcile (required, or tertiary dies)
 

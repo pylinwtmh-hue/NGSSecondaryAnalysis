@@ -1699,8 +1699,7 @@ chr1 602156 CA>CG,GG   RefCall;VQSRTrancheSNP99.90to100.00 COMBINED=2
 **修正後重跑（`-resume`，從 `COMBINE_PHASED` 往後）**：ensemble 的 RefCall 28,050 → **0**；
 combine stderr `nocall_passthrough` DV **865,130**（≈ DV 否決的候選數，約佔 DV 紀錄 16%）、HC **0**；
 三級「拆兩列」23,023 → **820**；ADD_CALLERS_TAG DV+HC 89.9% / DV only 2.6% / HC only 7.4%。
-剩下 820 個推測是兩個 caller 對同一變異寫法不同（例如一邊 combine 帶前導鹼基、另一邊是最小表示），
-ensemble merge 前的 `norm -m -any` 沒有 `-f`（不正規化），三級 `norm -f` 後才對齊；待看實例確認。
+剩下 820 個：抽查 5 例都是兩個 caller 對同一變異的寫法不同：combine 合成時叢集範圍從第一個成分的 POS 開始，成分若是 indel 就帶著它的前導鹼基，而合成結果沒有再最小化；DV、HC 拆成分的方式不同 → 前導鹼基長度不同 → POS 不同，merge 合不起來，三級 norm 修剪後才一樣。兩邊各自最小化後 5 例完全相同。
 
 **另外兩件同時確認的事**：
 - **SUZ12 在這次重跑已不是當初出錯的情境**：同一個缺失成分 DP/AD/VAF 完全相同（24 / 10,14 / 0.583），
@@ -1712,7 +1711,11 @@ ensemble merge 前的 `norm -m -any` 沒有 `-f`（不正規化），三級 `nor
   **截成第一個 allele**（bcftools `plugins/fixploidy.c`：`0/1`、`0|1`→`0`，`1|0`→`1`）。沒開 phasing 時 het
   一律變 REF；開了之後 phase 方向決定結果 → 一部分男性 chrX「het」（多半是誤比對）在報告裡顯示成
   **hemizygous**。VAL55 實測（非合併、GT=1、有 PS，即原本 phased het 被截成 ALT）：DV 234、HC 403 筆；
-  被截成 REF 的（GT=0、有 PS）DV 292、HC 875 筆。可能的方向：男性 non-PAR 不送 whatshap，
+  被截成 REF 的（GT=0、有 PS）DV 292、HC 875 筆。修正後重跑的三級 NONE 8,656 筆**全部**在 chrX（2,607）
+  與 chrY（6,049）＝被截成 REF、報告裡看不到的男性 het。
+  ⚠️ 不能一律藏掉：46,XY 男性遺傳來的變異（不論顯性或隱性）都是 hemizygous，不受影響；但男性出現的 het
+  除了比對假象，也可能是 47,XXY 或**體細胞嵌合** —— X-linked dominant、男性通常致死的疾病（IKBKG、MECP2、
+  CDKL5、PORCN、OFD1…）存活的男性病人常是嵌合；PCDH19 則是 hemizygous 男性通常不發病、嵌合男性才發病。可能的方向：男性 non-PAR 不送 whatshap，
   或 fixploidy 前把單倍體區的 het 改成 missing。
 
 ## 未來進步方向（Roadmap；尚未實作，備忘）
