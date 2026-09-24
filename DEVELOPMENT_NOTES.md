@@ -1573,6 +1573,8 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
       `prepare_vcf` 照舊讀 `*.ensemble.fixed.vcf.gz`（名稱不變）。只 publish 這個 fixed，中間檔留 `work/`。
     - **三級（DRAGEN）**：`prepare_vcf_dragen.nf` 的 `COMBINE_DRAGEN` 在 norm/tag 前跑同一支
       `combine_phased.py`，用 DRAGEN **原生 PS**（不需 whatshap）。`params.combine_phased`（預設 true）開關。
+      2026-09 起只拿 PASS（與全部 chrM）進 combine：合成紀錄沿用 anchor 的 FILTER、三級只收 PASS，舊版會讓
+      PASS 變異被同叢較寬的 non-PASS 紀錄一起丟掉（VAL-10 發現，見三級 DEVELOPMENT_NOTES）。
     - **phasing 在 `+fixploidy` 之前** → 原始 VCF 皆 diploid → 無 PloidyError → 不需 sex-aware 切分
       （#37 作廢），只依 contig 分片（主要 contig phase、其餘 passthrough，#39 的 catch-all 仍在）；倍體由
       後面 `+fixploidy` 校正。

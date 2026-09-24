@@ -121,7 +121,10 @@ compounds; tertiary `prepare_vcf` reads `*.ensemble.fixed.vcf.gz` unchanged.
 **DRAGEN — in tertiary.** `NGSTertiaryAnalysis/modules/prepare_vcf_dragen.nf`'s
 `COMBINE_DRAGEN` runs the same `combine_phased.py` using DRAGEN's **native PS** (no
 whatshap), gated by `params.combine_phased` (default true). Does NOT touch NCKUH's
-`prepare_vcf`.
+`prepare_vcf`. Since 2026-09 only PASS records (plus all of chrM) enter the combine: a combined
+record takes its anchor's FILTER and `ADD_DRAGEN_TAG` keeps PASS only, so a PASS call clustered
+with a wider non-PASS record used to disappear, and a filtered allele could end up inside a PASS
+MNV (found on VAL-10). No change to `combine_phased.py`.
 
 **`combine_phased.py`** (stdlib-only; **duplicated byte-identical in the tertiary repo —
 keep in sync**; md5 must match): clusters variants by reference footprint (overlap, or
