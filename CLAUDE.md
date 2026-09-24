@@ -240,12 +240,14 @@ tertiary). It also **no longer contains DV RefCall records**, so its record coun
 **lowers** the variant count (compound multi-records → one MNV); validate by specific
 sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 
-**Validation status (2026-07):** secondary confirmed (VAL55 SUZ12 → `GAAA>GTT`; NA12878
-`chr1:111241360` AD well-formed; preflight passes). Combined-record depth-preservation fix
-confirmed by unit+integration tests (`test_combine_phased.py`, now 19 cases) and a CLI smoke run
-(SUZ12 compound keeps `AD=30,12`; reporter's `1/2 AD=0,28,20` passes through intact). Pending:
-tertiary NCKUH end-to-end `-resume` (`ADD_CALLERS_TAG`); a real DRAGEN sample re-run to confirm
-`AD_DRAGEN` now populates; broader multi-sample validation before clinical use.
+**Validation status:** secondary confirmed (2026-07: VAL55 SUZ12 → `GAAA>GTT`, written
+`31998951 AAA>TT` since the 2026-09 minimisation; NA12878 `chr1:111241360` AD well-formed;
+preflight passes). Combined-record depth-preservation fix confirmed by unit+integration tests
+(`test_combine_phased.py`, now 19 cases), a CLI smoke run (SUZ12 compound keeps `AD=30,12`;
+reporter's `1/2 AD=0,28,20` passes through intact) and a real DRAGEN re-run (VAL-10, 2026-07:
+`AD_DV` filled on 5,940,465 / 5,940,563 rows, the 98 others have no AD in the source). Tertiary
+NCKUH end-to-end confirmed on the VAL55 re-runs (2026-09, figures above). Pending: broader
+multi-sample validation before clinical use.
 
 ---
 
