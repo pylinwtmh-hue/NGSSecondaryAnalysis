@@ -16,6 +16,11 @@ Covers the cases discussed for the NCKUH compound-merging design:
     never join a cluster: not an anchor, no padding, no bridging
   - combined REF/ALT are written minimised, so two callers' representations of one
     event get the same POS (a pure deletion keeps its anchor base)
+  - overlapping het calls whose relative phase is unknown (unphased, or different PS) are
+    not merged; a merge that would swallow or truncate an allele (SNV inside a deletion,
+    deletion inside a deletion, insertion anchored inside a deletion, * allele) is not
+    written either -> the source records pass through untouched (VAL-10: 7,927 alleles lost)
+  - an SNV and an indel at the same base are applied SNV first (no SNV swallowed)
 
 NOTE (known limitation, see module docstring): reconstruction of *overlapping*
 edits on the SAME haplotype (padded/complex caller splits) is not universally
@@ -308,6 +313,99 @@ def test_haploid_nocall_passthrough():
     print("PASS test_haploid_nocall_passthrough -> haploid 0 / . not clustered")
 
 
+def _passthrough(recs, fetch, reason, max_gap=2):
+    """recs 必須原封輸出、不合成，且統計歸在 reason（phase_unknown / overlap_conflict）。"""
+    out, st = _run_process(recs, fetch, max_gap=max_gap)
+    assert st["clusters_merged"] == 0 and st["clusters_fallback"] == 1, st
+    assert st["clusters_" + reason] == 1, st
+    assert sorted(out) == sorted(recs), out
+    return st
+
+
+def test_unphased_overlap_not_merged():
+    # VAL-10 chr4:115927671: two overlapping het deletions without PS. Old combine put both on
+    # one haplotype and wrote a 5-bp deletion (CTGTTT>C 0|1 + fake PS) that neither call made.
+    fetch = mkfetch({"chr4": (100, "CTGTTTA")})
+    _passthrough(["chr4\t100\t.\tCTGT\tC\t40\tPASS\t.\tGT:AD:DP\t0/1:20,8:28",
+                  "chr4\t102\t.\tGTTT\tG\t40\tPASS\t.\tGT:AD:DP\t0/1:20,9:29"],
+                 fetch, "phase_unknown")
+    # same pair phased but in two different phase sets: relative phase still unknown
+    _passthrough(["chr4\t100\t.\tCTGT\tC\t40\tPASS\t.\tGT:AD:DP:PS\t0|1:20,8:28:100",
+                  "chr4\t102\t.\tGTTT\tG\t40\tPASS\t.\tGT:AD:DP:PS\t0|1:20,9:29:102"],
+                 fetch, "phase_unknown")
+    print("PASS test_unphased_overlap_not_merged -> no 5-bp deletion invented")
+
+
+def test_unphased_delins_not_merged():
+    # The SUZ12 del+ins shape, but with no phase: could be cis (delins) or trans (del on one
+    # copy, ins on the other). Not merged; with a common PS it still is (test_merged_keeps_format).
+    fetch = mkfetch({"chr17": (31998950, "GAAA")})
+    _passthrough(["chr17\t31998950\t.\tGAAA\tG\t60\tPASS\t.\tGT:AD:DP\t0/1:30,12:42",
+                  "chr17\t31998953\t.\tA\tATT\t55\tPASS\t.\tGT:AD:DP\t0/1:31,11:42"],
+                 fetch, "phase_unknown")
+    print("PASS test_unphased_delins_not_merged -> unphased del+ins kept as 2 records")
+
+
+def test_snv_inside_deletion_not_swallowed():
+    # An SNV inside a deletion cannot sit on the same copy. Old combine wrote only the deletion
+    # and the SNV vanished from the report (VAL-10 chr1:1746439, chr1:2981045 ...).
+    fetch = mkfetch({"chr1": (500, "TTCAT")})
+    _passthrough(["chr1\t500\t.\tTTCAT\tT\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:500",
+                  "chr1\t502\t.\tC\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:500"],
+                 fetch, "overlap_conflict")
+    print("PASS test_snv_inside_deletion_not_swallowed")
+
+
+def test_deletion_inside_hom_deletion_not_swallowed():
+    # VAL-10 chr1:94814: hom 11-bp deletion + het 1-bp deletion inside it (contradictory calls).
+    # Old combine returned the hom deletion alone; the het call disappeared.
+    fetch = mkfetch({"chr1": (94814, "CTTTTCTTTTCT")})
+    _passthrough(["chr1\t94814\t.\tCTTTTCTTTTCT\tC\t50\tPASS\t.\tGT:AD:DP\t1/1:0,20:20",
+                  "chr1\t94824\t.\tCT\tC\t30\tPASS\t.\tGT:AD:DP\t0/1:9,8:17"],
+                 fetch, "overlap_conflict")
+    print("PASS test_deletion_inside_hom_deletion_not_swallowed")
+
+
+def test_insertion_inside_deletion_not_truncated():
+    # An insertion anchored in the middle of a deletion: old combine appended alt[k:] and
+    # dropped (here all of) the inserted sequence.
+    fetch = mkfetch({"chr1": (1300, "CGTTTC")})
+    _passthrough(["chr1\t1300\t.\tCGTTTC\tC\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:1300",
+                  "chr1\t1302\t.\tT\tTCCC\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:1300"],
+                 fetch, "overlap_conflict")
+    print("PASS test_insertion_inside_deletion_not_truncated")
+
+
+def test_star_allele_not_rebuilt():
+    # A '*' (spanning-deletion) allele is not sequence; never write it into a haplotype.
+    fetch = mkfetch({"chr1": (900, "ACG")})
+    _passthrough(["chr1\t900\t.\tACG\tA\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:900",
+                  "chr1\t901\t.\tC\tT,*\t50\tPASS\t.\tGT:AD:DP:PS\t1|2:1,9,9:19:900"],
+                 fetch, "overlap_conflict")
+    print("PASS test_star_allele_not_rebuilt")
+
+
+def test_snv_and_indel_at_same_base():
+    # Same copy, same base: SNV A>G + insertion A>AT. Old combine sorted by string ("AT" < "G"),
+    # applied the insertion first and swallowed the SNV (A>AT). SNV first -> A>GT.
+    fetch = mkfetch({"chr1": (700, "A")})
+    out, st = _run_process(["chr1\t700\t.\tA\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:700",
+                            "chr1\t700\t.\tA\tAT\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:700"],
+                           fetch, max_gap=2)
+    assert st["clusters_merged"] == 1 and len(out) == 1, (st, out)
+    f = out[0].split("\t")
+    assert (f[1], f[3], f[4]) == ("700", "A", "GT"), f[:5]
+    # SNV + deletion at the same base: the deletion's anchor is rewritten, the rest deleted
+    fetch = mkfetch({"chr1": (800, "AC")})
+    out, st = _run_process(["chr1\t800\t.\tA\tG\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:800",
+                            "chr1\t800\t.\tAC\tA\t50\tPASS\t.\tGT:AD:DP:PS\t0|1:10,9:19:800"],
+                           fetch, max_gap=2)
+    assert st["clusters_merged"] == 1 and len(out) == 1, (st, out)
+    f = out[0].split("\t")
+    assert (f[1], f[3], f[4]) == ("800", "AC", "G"), f[:5]
+    print("PASS test_snv_and_indel_at_same_base -> A>GT, AC>G")
+
+
 if __name__ == "__main__":
     test_suz12_hc()
     test_cis_two_snv_gap()
@@ -328,4 +426,11 @@ if __name__ == "__main__":
     test_nocall_does_not_bridge()
     test_haploid_nocall_passthrough()
     test_merged_output_minimised()
+    test_unphased_overlap_not_merged()
+    test_unphased_delins_not_merged()
+    test_snv_inside_deletion_not_swallowed()
+    test_deletion_inside_hom_deletion_not_swallowed()
+    test_insertion_inside_deletion_not_truncated()
+    test_star_allele_not_rebuilt()
+    test_snv_and_indel_at_same_base()
     print("\nALL TESTS PASSED")

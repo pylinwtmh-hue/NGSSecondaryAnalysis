@@ -130,7 +130,9 @@ MNV (found on VAL-10). No change to `combine_phased.py`.
 keep in sync**; md5 must match): clusters variants by reference footprint (overlap, or
 *cis* gap ≤ `combine_max_gap`, default 2), local-haplotype-reconstructs each cluster into
 an MNV; het-cis / hom only, non-overlapping trans left alone; ref-free trim first to drop
-caller "padding". Tests: `python3 scripts/test_combine_phased.py`.
+caller "padding". A cluster is merged only if its het members' phase is known and every
+allele can be written in full (see "Overlapping calls" below). The merge decision lives in
+`plan_cluster()`. Tests: `python3 scripts/test_combine_phased.py` (26 cases).
 
 ### ⚠️ Combined records must keep depth (`AD`/`DP`/`VAF`) — do NOT emit `GT:PS` only
 
@@ -143,13 +145,15 @@ locus** `VAF`/`AD` rather than recomputing a misleading `1.0` from a 2-element `
 
 Reconstruction is **ploidy-aware**: **diploid** clusters rebuild two haplotypes (phased
 `0|1`/`1|1`/…); **all-haploid non-mito** clusters (male non-PAR `chrX`/`chrY`) rebuild the
-single copy → hemizygous `GT=1` (no `PS`), still inheriting the anchor's AD. Four cases
+single copy → hemizygous `GT=1` (no `PS`), still inheriting the anchor's AD. Six cases
 **do not reconstruct** — they pass the source records through untouched so their `AD`
 survives (downstream `bcftools norm -m -any` splits them): (a) reconstruction yields 2 ALTs
 (`1|2`, incl. native multiallelic `1/2`); (b) no biallelic anchor in the cluster; (c) mixed
 ploidy (haploid + diploid in one cluster); (d) `chrM` haploid clusters (multi-copy
-heteroplasmy — not safe to treat as one molecule). The stderr line reports `merged_clusters`
-(with `haploid=`) and `passthrough_clusters`. (NCKUH combine runs pre-`+fixploidy` =
+heteroplasmy — not safe to treat as one molecule); (e) phase unknown; (f) an overlap that
+would swallow or truncate an allele (both below). The stderr line reports `merged_clusters`
+(with `haploid=`), `passthrough_clusters`, `nocall_passthrough=`, and `phase_unknown=` /
+`overlap_conflict=` (subsets of `passthrough_clusters`). (NCKUH combine runs pre-`+fixploidy` =
 uniformly diploid, so the haploid path is in practice DRAGEN-only.)
 
 > The earlier version emitted only `GT:PS` on combined records, dropping `AD`/`DP`/`VAF` to
@@ -182,6 +186,35 @@ cannot join them; trimming both sides makes all 5 identical. **Fixed:** `flush()
 `trim_alleles()` on the reconstructed REF/ALT before rendering (a pure deletion keeps its anchor
 base); SUZ12 is therefore written `31998951 AAA>TT`, not `31998950 GAAA>GTT`. Test:
 `test_merged_output_minimised`.
+
+### ⚠️ Overlapping calls merge only with known phase and a clean overlap (2026-09)
+
+Overlapping records always fall into one cluster, but a merge now needs two things:
+- **Known phase** (`_phase_unknown()`): ≥2 het members must all be phased in one phase set (a
+  phased GT without `PS` counts as the one implicit set, per the VCF spec). Before, unphased
+  GTs were placed on the same haplotype by position, which assumed *cis* without evidence.
+- **A clean overlap** (`build_hap()`): an overlapped edit may only share its unchanged VCF anchor
+  base(s) (`k ≤ len(ref)`, `k ≤ len(alt)`, `alt[:k] == ref[:k]`, e.g. SUZ12's `A>ATT` right after
+  `GAAA>G`). Anything else raises `RebuildConflict`, and the cluster passes through: an SNV
+  inside a deletion, a deletion inside a deletion, two overlapping deletions, an insertion
+  anchored inside a deletion, or a `*`/symbolic ALT. Same-position edits apply the
+  anchor-changing SNV/MNV first (`_edit_order()`), so `A>G` + `A>AT` gives `A>GT`. Before this, the
+  insertion was applied first and the SNV was swallowed. Identical duplicates count once.
+
+Found on VAL-10 (DRAGEN, female WGS). A read-only diagnostic replayed the deployed script and
+matched `COMBINE_DRAGEN`'s stderr exactly. Of 104,277 reported merges, 9,299 joined het calls of
+unknown phase. **7,927 PASS alleles vanished** in merges (6,778 unphased clusters + 88 phased);
+1,435 clusters wrote an allele nobody called (fused deletions, truncated insertions). The
+1,096 unphased-but-clean del+ins clusters also pass through now: without a PS nothing says
+they are *cis*. NCKUH SUZ12 carries whatshap's PS and still merges. Tests (all fail on the old
+code): `test_unphased_overlap_not_merged`, `test_unphased_delins_not_merged`,
+`test_snv_inside_deletion_not_swallowed`, `test_deletion_inside_hom_deletion_not_swallowed`,
+`test_insertion_inside_deletion_not_truncated`, `test_star_allele_not_rebuilt`,
+`test_snv_and_indel_at_same_base`. In 40 random datasets, none of the 2,707 merges swallows or
+truncates an allele. **NCKUH effect:** applies on the next secondary run (`COMBINE_PHASED`
+stages the script, so `-resume` re-runs from there). Overlapping hets that whatshap left
+unphased now enter the ensemble as separate records. Watch `phase_unknown=` /
+`overlap_conflict=` and the tertiary split-row count (DV row + HC row).
 
 ### ⚠️ Male haploid-region hets are handled before `+fixploidy` (2026-09)
 
@@ -246,7 +279,7 @@ sites (SUZ12) + `combine_phased.py` stderr, **not** by total count.
 **Validation status:** secondary confirmed (2026-07: VAL55 SUZ12 → `GAAA>GTT`, written
 `31998951 AAA>TT` since the 2026-09 minimisation; NA12878 `chr1:111241360` AD well-formed;
 preflight passes). Combined-record depth-preservation fix confirmed by unit+integration tests
-(`test_combine_phased.py`, now 19 cases), a CLI smoke run (SUZ12 compound keeps `AD=30,12`;
+(`test_combine_phased.py`, now 26 cases), a CLI smoke run (SUZ12 compound keeps `AD=30,12`;
 reporter's `1/2 AD=0,28,20` passes through intact) and a real DRAGEN re-run (VAL-10, 2026-07:
 `AD_DV` filled on 5,940,465 / 5,940,563 rows, the 98 others have no AD in the source). Tertiary
 NCKUH end-to-end confirmed on the VAL55 re-runs (2026-09, figures above). Pending: broader

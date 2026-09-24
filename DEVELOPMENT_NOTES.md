@@ -1656,6 +1656,20 @@ CNV、SV 和 Mitochondria 的 variant classification 留給三級分析：
     chrY_het_to_missing_HC=10066`；帶標記的 4,326 筆全在 chrX；三級 NONE 10,159 筆全在 chrY；第 44 條的
     「拆兩列」820 → 2（剩下是重複序列 indel 左對齊差異；要消除需在 merge 前 `norm -f`，未做）。
     **chrM 不處理**（實驗室決定）：ensemble 裡 chrM 的 het 仍會被截斷，粒線體以 `07_mitochondria` 為準。
+46. **`combine_phased.py` 把 phase 未知的重疊 het 當成同一條單體合成（2026-09）**：「足跡重疊一律合」＋
+    未 phase 的 GT 在 `reconstruct()` 裡依位置都落在同一條單體 → 等於假設 cis。缺失範圍內的 SNV、包在大缺失裡
+    的小缺失被吃掉（報告裡消失）；兩個重疊缺失被併成更長的缺失、錨在缺失中間的插入被截斷（寫出沒人 call 的
+    allele）；還給假的 `0|1`+PS。phased 也會：同一條單體上互相矛盾的 call、同一鹼基的 SNV+插入（舊版字串排序先
+    套插入，SNV 被吃）。**VAL-10（DRAGEN 女性 WGS）實測**：104,277 個會出報告的合成中 9,299 個是 phase 未知；
+    **7,927 個 PASS allele 消失**、1,435 叢寫出沒人 call 的 allele。修法：(1) ≥2 顆 het 不在同一 phase set →
+    不合（`_phase_unknown()`；phased 無 PS = 同一隱含 set）；(2) `build_hap()` 重疊只准落在沒改變的錨定鹼基，
+    否則 `RebuildConflict` → 整叢原封通過（`*`/symbolic ALT 同）；(3) 同一 POS 先套 SNV/MNV 再套 indel
+    （`_edit_order()`）；(4) 判斷抽成 `plan_cluster()`，stderr 加 `phase_unknown=` `overlap_conflict=`。
+    unphased 但乾淨的 del+ins（1,096 叢）也不合：沒有 PS 就無法確定 cis；SUZ12 有 whatshap PS 照合。
+    測試 19 → 26 個（新 7 個舊版全失敗）；40 組隨機資料 2,707 個合成沒有 allele 被吃掉或截斷。
+    二級下次重跑生效（staged input，`-resume` 從 `COMBINE_PHASED` 往後）：看 stderr 兩個新數字與三級拆兩列數。
+    同批三級修正（見三級 DEVELOPMENT_NOTES）：`COMBINE_DRAGEN` 只拿 PASS；`ADD_DRAGEN_TAG` 丟掉拆多等位後
+    樣本沒帶的 allele（GT `0/0`，如 CYP21A2 `C>G,A 2/2` 拆出的 `C>G 0/0`）。
 
 ---
 

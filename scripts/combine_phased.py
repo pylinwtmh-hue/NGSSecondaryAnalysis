@@ -31,8 +31,9 @@ scripts/combine_phased.py
   (2) 足跡空隙 gap ≤ --max-gap 且**在同一單體上（cis）**。
 其中「cis」定義（保守）：任一顆為 homozygous（在兩條單體上都在），或兩顆皆
 phased、同一個 PS、且非參考等位都落在同一條單體。trans（同 PS 但落在不同單體）
-且**不重疊** → 不合（本來就是兩顆）。無法判定 phase 的（未 phase 的 het）→ 只在
-**重疊**時才合，否則原封通過。
+且**不重疊** → 不合（本來就是兩顆）。重疊的一定歸同一叢，但**只有 phase 已知才合成**：
+叢集內 ≥2 顆 het 且不全是「同一個 phase set 的 phased」（未 phase、或 PS 不同）→ 原封通過
+（2026-09，見下方 ⚠️）。phased 但沒有 PS 欄的，依 VCF 規格屬於同一個隱含的 phase set。
 
 叢集重建：對 hapA / hapB 兩條單體，各自沿參考游標套用該單體上的變異，重建序列；
 再依 {ref, hapA_seq, hapB_seq} 去重得到 REF / ALT，並重新給 GT（phased）。因此：
@@ -46,9 +47,13 @@ phased、同一個 PS、且非參考等位都落在同一條單體。trans（同
     FILTER=RefCall）→ **不參與叢集**，原行輸出（二級 BCFTOOLS_ENSEMBLE 之後會把 DV 的丟掉）
 
 重疊套用規則（處理如 SUZ12 的 GAAA>G 與 A>ATT 在同一單體重疊）：沿參考游標套用，
-遇到 POS < 游標（重疊已消耗的 ref）時，只補上該變異 ALT 中「尚未輸出」的尾段
-（= 插入的部分）。SUZ12：hapB = "G"(delAAA) 之後補 "TT" → GAAA>GTT，符合
-c.2168_2170delAAAinsTT（輸出時再最小化成 31998951 AAA>TT，見下）。
+遇到 POS < 游標（這顆的前 k 個 ref 鹼基已被前面的變異處理過）時，只有當這 k 個鹼基在這顆裡
+**沒有改變**（ALT 前 k 個 == REF 前 k 個，即 VCF 的前導／錨定鹼基）才把其餘部分接上去。
+SUZ12：hapB = "G"(delAAA) 之後，A>ATT 的 k=1、錨定鹼基 A 不變 → 補上 "TT" → GAAA>GTT，符合
+c.2168_2170delAAAinsTT（輸出時再最小化成 31998951 AAA>TT，見下）。其他重疊（缺失範圍內的 SNV、
+包在大缺失裡的小缺失、錨在缺失中間的插入…）代表兩顆在同一條單體上互相矛盾 → 整叢原封通過，
+不吃掉、不截斷任何一個 allele（2026-09）。同一位置時先套改變錨定鹼基的 SNV/MNV、再套 indel；
+完全相同的重複紀錄只算一次。
 
 輸出與相依
 ----------
@@ -67,7 +72,9 @@ c.2168_2170delAAAinsTT（輸出時再最小化成 31998951 AAA>TT，見下）。
     (a) 叢集重建後有 2 個 ALT（1|2，如原生 multiallelic 1/2）；
     (b) 叢集內找不到可當 anchor 的 biallelic 紀錄；
     (c) 叢集內「混 ploidy」（haploid 與 diploid 同叢）；
-    (d) chrM 的 haploid 叢集（多拷貝異質性，不宜當單一分子合）。
+    (d) chrM 的 haploid 叢集（多拷貝異質性，不宜當單一分子合）；
+    (e) phase 未知：≥2 顆 het 不在同一個 phase set（stderr 的 phase_unknown=）；
+    (f) 重疊互相矛盾：某顆的 allele 會被吃掉或截斷（stderr 的 overlap_conflict=）。
 * 原始（未合、孤立）紀錄一律原封輸出（保留所有 FORMAT）。
 * header 會補上 ##INFO=<ID=COMBINED> 與 ##FORMAT=<ID=PS>（若原本沒有）。
 
@@ -83,6 +90,14 @@ c.2168_2170delAAAinsTT（輸出時再最小化成 31998951 AAA>TT，見下）。
      - 未 phase 的 het 也被寫成 0|1 並給假的 PS；被否決候選還會把兩顆不相干的 call 串成同一叢。
    合成紀錄的 GT 有 ALT，所以二級 BCFTOOLS_ENSEMBLE 的 DV `GT="alt"` 過濾擋不掉。實例 VAL55：ensemble 有
    28,050 筆 FILTER=RefCall 全部帶 COMBINED；三級 23,023 個變異被拆成 DV 一列 + HC 一列。
+
+⚠️ 重疊但 phase 未知的 het 曾被當成在同一條單體上合成（2026-09 修正，上方 (e)(f)）。未 phase 的
+   GT 在 reconstruct() 裡依位置都落在同一條單體；於是缺失範圍內的 SNV、包在大缺失裡的小缺失被吃掉
+   （PASS 變異從報告消失），兩個重疊的缺失被併成更長的缺失、錨在缺失中間的插入被截斷（寫出兩個 caller
+   都沒 call 的 allele），還給了假的 0|1 + PS。實例 VAL-10（DRAGEN 女性 WGS，只拿 PASS）：104,277 個合成中
+   9,299 個是 phase 未知的 het；7,927 個 PASS allele 在合成時消失（unphased 6,778 叢、phased 88 叢），
+   1,435 叢寫出沒人 call 的 allele。phased 也會發生：同一條單體上互相矛盾的 call（如 hom 缺失裡的 het 缺失）、
+   同一位置的 SNV + 插入（舊版依字串排序先套插入，SNV 被吃掉）。
 """
 
 import argparse
@@ -243,31 +258,51 @@ def cluster_vars(variants: List[Var], max_gap: int) -> List[List[Var]]:
 # ─────────────────────────────────────────────────────────────
 # 單體重建
 # ─────────────────────────────────────────────────────────────
+class RebuildConflict(Exception):
+    """這一叢無法在不吃掉、不截斷任何 allele 的情況下重建（重疊互相矛盾，或 ALT 是 * / symbolic）。
+    呼叫端（plan_cluster）接到後整叢原封通過。"""
+
+
+def _edit_order(e):
+    """build_hap 的套用順序：依 POS；同一位置先套「改變錨定鹼基」的 SNV/MNV，再套保留錨定鹼基的
+    indel。舊版用字串排序，同一鹼基的 SNV + 插入（A>G、A>AT）會先套插入，SNV 被吃掉。"""
+    pos, r, a = e
+    return (pos, a[:1] == r[:1], r, a)
+
+
 def build_hap(span_start: int, ref_seq: str, edits: List[tuple]) -> str:
     """
-    edits: list of (pos, ref, alt)（此單體上的變異，已排序、可能重疊）。
-    沿參考游標重建；遇重疊只補 ALT 尚未輸出的尾段。
+    edits: list of (pos, ref, alt)（此單體上的變異，可能重疊）。沿參考游標重建。
+    重疊時，這顆的前 k 個 ref 鹼基已被前面的變異處理過（k = 游標 - POS）。只有這 k 個鹼基在這顆裡
+    沒有改變（k ≤ len(ref)、k ≤ len(alt)、alt[:k] == ref[:k]，即 VCF 的前導／錨定鹼基）才接上其餘部分：
+      SUZ12 的 A>ATT 接在 GAAA>G 之後：k=1、錨定 A 不變 → 補上 TT；
+      同一 POS 的 SNV + 缺失：缺失的錨定鹼基已被 SNV 改寫，其餘照刪。
+    其他重疊（缺失範圍內的 SNV、包在大缺失裡的小缺失、兩個互相重疊的缺失、錨在缺失中間的插入）
+    raise RebuildConflict —— 舊版會吃掉或截斷其中一個 allele。完全相同的重複 edit 只算一次。
     """
     out = []
     cursor = span_start                       # 下一個要輸出的 ref 位置（1-based）
     span_end = span_start + len(ref_seq) - 1
-    for pos, r, a in sorted(edits):
+    for pos, r, a in sorted(set(edits), key=_edit_order):
+        if a == "*" or a.startswith("<"):     # spanning deletion / symbolic：不是鹼基序列
+            raise RebuildConflict("symbolic ALT %s at %d" % (a, pos))
         if pos >= cursor:
             out.append(ref_seq[cursor - span_start: pos - span_start])   # 中間未變 ref
             out.append(a)
-            cursor = pos + len(r)
         else:
-            consumed = cursor - pos           # 該變異 ref 已被前一顆消耗的長度
-            if consumed < len(a):
-                out.append(a[consumed:])       # 只補尾段（多半是插入的部分）
-            cursor = max(cursor, pos + len(r))
+            k = cursor - pos                  # 這顆的 ref 已被前面處理過的長度
+            if k > len(r) or k > len(a) or a[:k] != r[:k]:
+                raise RebuildConflict("overlap at %d: %s>%s" % (pos, r, a))
+            out.append(a[k:])                 # 其餘部分（多半是插入的序列）
+        cursor = pos + len(r)                 # 重疊時 k ≤ len(r)，游標不會倒退
     if cursor <= span_end:
         out.append(ref_seq[cursor - span_start:])
     return "".join(out)
 
 
 def reconstruct(cluster: List[Var], fetch: Callable[[str, int, int], str]):
-    """回傳 (pos, ref, alt_list, gt_list) 或 None（無非參考、無法合）。"""
+    """回傳 (pos, ref, alt_list, gt_list) 或 None（無非參考、無法合）；
+    重疊互相矛盾時 build_hap 會 raise RebuildConflict。"""
     chrom = cluster[0].chrom
     span_start = min(v.pos for v in cluster)
     span_end = max(v.end for v in cluster)
@@ -375,10 +410,58 @@ def _render_merged(chrom: str, pos: int, ref: str, alt: str, gtstr: str,
                       "COMBINED=%d" % n_combined, ":".join(keys), ":".join(vals)])
 
 
+# ─────────────────────────────────────────────────────────────
+# 合不合成的決定（process() 與診斷腳本共用同一份邏輯）
+# ─────────────────────────────────────────────────────────────
+def _phase_unknown(cluster: List[Var]) -> bool:
+    """叢集內有 ≥2 顆雙套 het，但它們不全是「同一個 phase set 的 phased」→ 相對 phase 未知。
+    這種叢集只可能因足跡重疊而形成（不重疊的 het 要 phased 同 PS 才會連進來）；未 phase 的 GT 在
+    reconstruct() 裡依位置都落在同一條單體，等於憑空假設 cis。phased 但沒有 PS 欄的，依 VCF 規格
+    屬於同一個隱含的 phase set。"""
+    hets = [v for v in cluster if len(v.alleles) == 2 and v.het_hap() is not None]
+    if len(hets) < 2:
+        return False
+    if not all(v.phased for v in hets):
+        return True
+    return len({v.ps or "." for v in hets}) != 1
+
+
+def plan_cluster(cluster: List[Var], fetch: Callable, is_mito: bool, sample_col: int = 0):
+    """決定一個多顆的叢集要不要合成。回傳 (res, anchor, reason)：
+    reason == "merged" 時 res = (pos, ref, alt_list, gt) 為合成結果；其餘 reason 代表原封通過：
+      phase_unknown     ≥2 顆 het 的相對 phase 未知（上方 (e)）
+      overlap_conflict  重疊互相矛盾，或含 * / symbolic ALT（(f)）
+      multi             重建後有 2 個 ALT，如 1|2（(a)）
+      no_anchor         找不到 biallelic、有 FORMAT 的 anchor（(b)）
+      mixed_or_mito     混 ploidy，或 chrM 的 haploid 叢集（(c)(d)）
+      no_alt            重建結果兩條都是 ref（正常不會發生）"""
+    ploidies = {len(v.alleles) for v in cluster}
+    anchor = _fmt_anchor(cluster, sample_col)
+    try:
+        if ploidies == {2}:                            # 全 diploid → 雙單體重建
+            if _phase_unknown(cluster):
+                return None, anchor, "phase_unknown"
+            res = reconstruct(cluster, fetch)
+            if res is not None and len(res[2]) > 1:
+                return None, anchor, "multi"
+        elif ploidies == {1} and not is_mito:          # 全 haploid（非 chrM）→ 單套重建
+            res = reconstruct_haploid(cluster, fetch)
+        else:                                          # 混 ploidy、chrM haploid、其他 → 不合
+            return None, anchor, "mixed_or_mito"
+    except RebuildConflict:
+        return None, anchor, "overlap_conflict"
+    if res is None:
+        return None, anchor, "no_alt"
+    if anchor is None:
+        return None, anchor, "no_anchor"
+    return res, anchor, "merged"
+
+
 def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
             sample_col: int = 0) -> dict:
     """主流程；回傳統計。fetch 可注入（測試用）。"""
     stats = {"clusters_merged": 0, "clusters_haploid": 0, "clusters_fallback": 0,
+             "clusters_phase_unknown": 0, "clusters_overlap_conflict": 0,
              "records_in": 0, "records_out": 0, "records_nocall": 0}
     header, chrom_vars, order_chrom = [], {}, []
     chrom_nocall = {}                  # chrom -> [(pos, line)]：沒有 ALT、不參與叢集的原行
@@ -398,20 +481,14 @@ def process(in_vcf: str, out_vcf: str, fetch: Callable, max_gap: int,
                 if len(cl) == 1:                       # 孤立顆 → 原行輸出，完全不動
                     recs.append((cl[0].pos, cl[0].line))
                     continue
-                ploidies = {len(v.alleles) for v in cl}
-                if ploidies == {2}:                    # 全 diploid → 雙單體重建
-                    res = reconstruct(cl, fetch)
-                    multi = res is not None and len(res[2]) > 1
-                elif ploidies == {1} and not is_mito:  # 全 haploid（非 chrM）→ 單套重建
-                    res, multi = reconstruct_haploid(cl, fetch), False
-                else:                                  # 混 ploidy、chrM haploid、其他 → 不合
-                    res, multi = None, False
-                anchor = _fmt_anchor(cl, sample_col)
-                # 無法重建 / 重建成多 ALT（1|2）/ 無 biallelic anchor → 原封通過（保留 AD）。
-                if res is None or multi or anchor is None:
+                res, anchor, reason = plan_cluster(cl, fetch, is_mito, sample_col)
+                # phase 未知 / 重疊矛盾 / 多 ALT（1|2）/ 無 anchor / 混 ploidy → 原封通過（保留 AD）。
+                if reason != "merged":
                     for v in cl:
                         recs.append((v.pos, v.line))
                     stats["clusters_fallback"] += 1
+                    if reason in ("phase_unknown", "overlap_conflict"):
+                        stats["clusters_" + reason] += 1
                     continue
                 pos, ref, alt_list, gt = res
                 # 輸出前最小化（見檔頭「輸出與相依」）：DV/HC 的前導鹼基長度不同時，才會對得上同一個 POS。
@@ -479,9 +556,10 @@ def main():
     st = process(a.inp, a.out, fa.fetch, a.max_gap, a.sample_index)
     sys.stderr.write(
         "[combine_phased] in=%d out=%d merged_clusters=%d (haploid=%d) "
-        "passthrough_clusters=%d nocall_passthrough=%d\n"
+        "passthrough_clusters=%d nocall_passthrough=%d phase_unknown=%d overlap_conflict=%d\n"
         % (st["records_in"], st["records_out"], st["clusters_merged"],
-           st["clusters_haploid"], st["clusters_fallback"], st["records_nocall"]))
+           st["clusters_haploid"], st["clusters_fallback"], st["records_nocall"],
+           st["clusters_phase_unknown"], st["clusters_overlap_conflict"]))
 
 
 if __name__ == "__main__":
